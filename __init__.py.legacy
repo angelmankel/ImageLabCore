@@ -1,0 +1,36 @@
+from server import PromptServer
+from .progress import add_progress_hook
+from .routes import SetupRoutes
+from .workflows import *
+from . import resources
+
+# Apply the send_sync patch to broadcast progress to all WebSocket clients
+# add_progress_hook()
+# print("[ImageLab] progress patch applied successfully")
+
+# Register API routes
+SetupRoutes(PromptServer.instance)
+print("[ImageLab] routes registered successfully")
+
+# Optional: Index all new models at startup
+AUTO_INDEX_ON_STARTUP = True
+
+if AUTO_INDEX_ON_STARTUP:
+    import threading
+    def index_on_startup():
+        print("[ImageLab] Starting background indexing of new models...")
+        try:
+            indexed = resources.index_all_new_models()
+            if indexed:
+                print(f"[ImageLab] Indexed models: {indexed}")
+            else:
+                print("[ImageLab] No new models to index")
+        except Exception as e:
+            print(f"[ImageLab] Error during startup indexing: {e}")
+    
+    # Run in background thread to not block startup
+    threading.Thread(target=index_on_startup, daemon=True).start()
+
+print("[ImageLab] Initialization complete")
+
+from .imagelab_nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

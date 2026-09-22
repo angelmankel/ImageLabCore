@@ -1,0 +1,71 @@
+{
+  "serviceType": "comfyui",
+  "apiName": "comfyui_generate",
+  "bypass": false,
+  "parameters": {
+    "workflowApiName": "sd15_basic",
+    "checkpoints": [
+      {
+        "label": "cyberrealistic_v90",
+        "apiName": "cyberrealistic_v90.safetensors"
+      }
+    ],
+    "vae": {
+      "label": "vae-ft-mse-840000-ema-pruned",
+      "apiName": "vae-ft-mse-840000-ema-pruned.safetensors"
+    },
+    "unet": [],
+    "clipSkip": -2,
+    "advancedGuidance": {
+      "active": false,
+      "tonemapMultiplier": 1,
+      "rescaleMultiplier": 1
+    },
+    "guidance": 3.5,
+    "dimensions": {
+      "width": 512,
+      "height": 512
+    },
+    "seed": 745527,
+    "sampler": {
+      "label": "euler_ancestral",
+      "apiName": "euler_ancestral",
+      "metadata": {}
+    },
+    "scheduler": {
+      "label": "normal",
+      "apiName": "normal",
+      "metadata": null
+    },
+    "steps": 9,
+    "denoise": 1,
+    "triggerWords": [],
+    "promptPrefix": {
+      "active": false,
+      "value": "embedding:lazypos.safetensors, score_9, score_8_up, score_7_up, score_6_up, score_5_up, score_4_up"
+    },
+    "prompt": "A powerful, dark-skinned warrior woman with a sleek, athletic build and sharp golden eyes. She wears a fitted red sleeveless top, black pants, and lightweight combat gear. Her long purple hair is tied back in a high ponytail, flowing behind her as she moves. She stands confidently on a rooftop under a moonlit sky, her pose dynamic and ready for battle. Her expression is fierce but composed, radiating speed, intelligence, and strength. Anime-style illustration, dramatic lighting, with a Japanese urban backdrop resembling the Soul Society.",
+    "promptStrength": 1,
+    "negativePromptStrength": 1,
+    "negativePrompt": "lowres, text, error, cropped, worst quality, low quality, jpeg artifacts, ugly, duplicate, morbid, mutilated, out of frame, extra fingers, mutated hands, poorly drawn hands, poorly drawn face, mutation, deformed, blurry, dehydrated, bad anatomy, bad proportions, extra limbs, cloned face, disfigured, gross proportions, malformed limbs, missing arms, missing legs, extra arms, extra legs, fused fingers, too many fingers, long neck, username, watermark, signature",
+    "inputImage": null,
+    "keepInputSize": false,
+    "loopback": {
+      "active": false,
+      "upscaleByModel": false,
+      "includeLowRes": false,
+      "loopbackSteps": 1,
+      "loopbackGuidance": 1.5,
+      "loopbackDenoise": 0.65,
+      "loopbackUpscaleMethod": {
+        "label": "nearest-exact",
+        "apiName": "nearest-exact",
+        "metadata": null
+      },
+      "loopbackUpscalePercent": 1
+    },
+    "loras": [],
+    "controlnets": [],
+    "ipadapters": []
+  }
+}
