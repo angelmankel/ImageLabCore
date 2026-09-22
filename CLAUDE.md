@@ -14,7 +14,7 @@ in place, so the container does not restart and the pod's port does not change. 
 real restart, **adding a route works the same as changing one**; aiohttp's frozen router stops
 mattering.
 
-Check what is actually running: `GET /imagelab/version` reports the directory it loaded from and
+Check what is actually running: `GET /imagelab/api/version` reports the directory it loaded from and
 the mtime of `api.py`.
 
 ## Things to know

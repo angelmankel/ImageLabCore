@@ -13,10 +13,10 @@ with the same default name without clobbering each other.
 
 Endpoints (registered from api.py):
 
-    POST   /imagelab/favorites              body: {filename, subfolder?, type?}
-    GET    /imagelab/favorites              -> {version, favorites:[...]}, ETag'd
-    DELETE /imagelab/favorites/{date}/{filename}
-    GET    /imagelab/favorites/view?date=&filename=
+    POST   /imagelab/api/favorites              body: {filename, subfolder?, type?}
+    GET    /imagelab/api/favorites              -> {version, favorites:[...]}, ETag'd
+    DELETE /imagelab/api/favorites/{date}/{filename}
+    GET    /imagelab/api/favorites/view?date=&filename=
 
 The list endpoint is cheap to poll — it just stats the favorites dir tree
 and hashes the resulting (path, mtime) tuples into a content version that

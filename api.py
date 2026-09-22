@@ -19,7 +19,7 @@ def setup_routes() -> None:
 
     # -- model hash index --------------------------------------------------
 
-    @routes.get("/imagelab/hashes")
+    @routes.get("/imagelab/api/hashes")
     async def get_hashes(request: web.Request) -> web.Response:
         """
         Return the full model-hash cache in one shot:
@@ -45,7 +45,7 @@ def setup_routes() -> None:
 
     # -- CivitAI downloads -------------------------------------------------
 
-    @routes.post("/imagelab/downloads")
+    @routes.post("/imagelab/api/downloads")
     async def start_download(request: web.Request) -> web.Response:
         """
         Start a CivitAI download.
@@ -55,7 +55,7 @@ def setup_routes() -> None:
         `folder` is a ComfyUI folder name (e.g. "checkpoints"); omit it to let
         the destination be derived from CivitAI's model type. Returns
         immediately -- the download runs in the background; poll
-        `GET /imagelab/downloads` for progress.
+        `GET /imagelab/api/downloads` for progress.
         """
         try:
             body = await request.json()
@@ -78,12 +78,12 @@ def setup_routes() -> None:
 
         return web.json_response({"version_id": int(version_id), "status": "started"})
 
-    @routes.get("/imagelab/downloads")
+    @routes.get("/imagelab/api/downloads")
     async def list_downloads(request: web.Request) -> web.Response:
         """List every tracked download -- active, completed, failed, cancelled."""
         return web.json_response({"downloads": downloads.list_downloads()})
 
-    @routes.delete("/imagelab/downloads/{version_id}")
+    @routes.delete("/imagelab/api/downloads/{version_id}")
     async def cancel_download(request: web.Request) -> web.Response:
         """Cancel an in-flight download, or dismiss a finished/failed row."""
         try:
@@ -94,7 +94,7 @@ def setup_routes() -> None:
 
     # -- local model deletion ---------------------------------------------
 
-    @routes.delete("/imagelab/models/{model_type}/{filename:.*}")
+    @routes.delete("/imagelab/api/models/{model_type}/{filename:.*}")
     async def delete_model(request: web.Request) -> web.Response:
         """Delete a local model file and drop it from the hash index."""
         try:
@@ -108,7 +108,7 @@ def setup_routes() -> None:
     # Persist explicitly starred images so they survive ComfyUI restarts.
     # See `favorites.py` for the layout and storage rationale.
 
-    @routes.post("/imagelab/favorites")
+    @routes.post("/imagelab/api/favorites")
     async def create_favorite(request: web.Request) -> web.Response:
         """
         Save a comfy-managed image (typically a PreviewImage output in `temp/`)
@@ -144,7 +144,7 @@ def setup_routes() -> None:
 
         return web.json_response({"favorite": fav})
 
-    @routes.get("/imagelab/favorites")
+    @routes.get("/imagelab/api/favorites")
     async def list_favorites(request: web.Request) -> web.Response:
         """
         List every favorite. ETag'd so polling clients don't repeatedly
@@ -159,7 +159,7 @@ def setup_routes() -> None:
             headers={"ETag": etag, "Cache-Control": "no-cache"},
         )
 
-    @routes.delete("/imagelab/favorites/{date}/{filename:.*}")
+    @routes.delete("/imagelab/api/favorites/{date}/{filename:.*}")
     async def delete_favorite(request: web.Request) -> web.Response:
         """Remove a favorite from disk."""
         date = request.match_info["date"]
@@ -169,7 +169,7 @@ def setup_routes() -> None:
             return web.json_response({"error": "Favorite not found", "code": "NOT_FOUND"}, status=404)
         return web.json_response({"deleted": True})
 
-    @routes.get("/imagelab/favorites/view")
+    @routes.get("/imagelab/api/favorites/view")
     async def view_favorite(request: web.Request) -> web.Response:
         """Serve the image bytes for a single favorite."""
         date = request.query.get("date", "")
@@ -187,7 +187,7 @@ def setup_routes() -> None:
     # it "did the push land?" is guesswork, and the honest test of a hot-push loop is a route that
     # did not exist before the push.
 
-    @routes.get("/imagelab/version")
+    @routes.get("/imagelab/api/version")
     async def get_version(request: web.Request) -> web.Response:
         """Identify the running node: its name, and the mtime of this file."""
         import os

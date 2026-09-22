@@ -3,7 +3,7 @@ CivitAI model downloads + local model deletion.
 
 Streams model files from CivitAI into the right ComfyUI model folder, tracks
 progress in memory (polled via the API — no WebSocket), and hands finished
-downloads to `hashing.py` so they land in `/imagelab/hashes` immediately.
+downloads to `hashing.py` so they land in `/imagelab/api/hashes` immediately.
 
 The destination folder is normally derived from CivitAI's own model type, so
 callers only need a version id. A folder can still be forced when CivitAI's
@@ -96,7 +96,7 @@ class DownloadProgress:
 
 # In-memory download state. Keyed by CivitAI version_id. Entries persist after
 # completion so the downloads panel can show finished/failed rows until the
-# client dismisses them (DELETE /imagelab/downloads/<id>).
+# client dismisses them (DELETE /imagelab/api/downloads/<id>).
 _progress: Dict[int, DownloadProgress] = {}
 _tasks: Dict[int, asyncio.Task] = {}
 _cancelled: set = set()
@@ -252,7 +252,7 @@ async def _run_download(version_id: int, folder: Optional[str], filename: Option
             os.remove(target_path)
         os.rename(temp_path, target_path)
 
-        # Hash it into the index so it shows up in /imagelab/hashes right away.
+        # Hash it into the index so it shows up in /imagelab/api/hashes right away.
         # hash_model is blocking (reads the whole file) — keep it off the loop.
         await asyncio.to_thread(hashing.hash_model, target_path)
 
