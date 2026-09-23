@@ -1,8 +1,8 @@
 """
 Model hashing.
 
-Computes SHA256 hashes for ComfyUI model files and caches the result so a
-model is only ever hashed once. The cache is a tree of per-model `.index`
+Computes SHA256 hashes for ComfyUI model files and caches the result so an
+unchanged model is only hashed once. The cache is a tree of per-model `.index`
 JSON sidecar files under `model_index/`, keyed by the model's path *relative
 to ComfyUI's models directory* (e.g. `checkpoints/SDXL/foo.safetensors`) so
 that two models sharing a bare filename in different folders never collide.
@@ -25,7 +25,7 @@ import folder_paths
 # stay human-browsable. Gitignored — this is local user data.
 INDEX_DIR = os.path.join(os.path.dirname(__file__), "model_index")
 
-# Model folder types to scan on startup.
+# Model folder types to scan.
 MODEL_TYPES = [
     "checkpoints", "loras", "vae", "embeddings", "upscale_models",
     "controlnet", "clip", "clip_vision", "diffusion_models",
@@ -37,6 +37,12 @@ MODEL_TYPES = [
 _INDEX: Dict[str, Dict] = {}
 _VERSION: str = "empty"
 _LOCK = threading.Lock()
+_HASH_LOCK = threading.Lock()
+
+
+def _file_signature(filepath: str) -> Dict:
+    stat = os.stat(filepath)
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
 def cache_key(filepath: str) -> str:
@@ -114,31 +120,40 @@ def _remember(entry: Dict) -> None:
 def hash_model(filepath: str, key: Optional[str] = None) -> Dict:
     """
     Ensure a model file is hashed. Returns its index dict. If the model has
-    already been hashed (its `.index` sidecar exists), this is a cheap no-op.
+    already been hashed and its size/mtime match, this is a cheap no-op.
     Either way the result is recorded in the in-memory index.
     """
     if key is None:
         key = cache_key(filepath)
 
-    index = load_index(key)
-    if not (index and index.get("hash")):
-        print(f"[ImageLab] Hashing {key} ...")
-        index = {
-            "key": key,
-            "filename": os.path.basename(filepath),
-            "hash": calculate_sha256(filepath),
-            "hashed_at": time.time(),
-        }
-        save_index(key, index)
+    # Downloads and the scanner can discover the same file simultaneously.
+    with _HASH_LOCK:
+        if os.path.exists(filepath + ".aria2"):
+            raise ValueError("Download still in progress")
+        signature = _file_signature(filepath)
+        index = load_index(key)
+        if not (index and index.get("hash") and index.get("file") == signature):
+            print(f"[ImageLab] Hashing {key} ...")
+            digest = calculate_sha256(filepath)
+            if os.path.exists(filepath + ".aria2") or _file_signature(filepath) != signature:
+                raise ValueError("File changed while hashing; retrying on next scan")
+            index = {
+                "key": key,
+                "filename": os.path.basename(filepath),
+                "hash": digest,
+                "hashed_at": time.time(),
+                "file": signature,
+            }
+            save_index(key, index)
 
-    _remember(index)
-    return index
+        _remember(index)
+        return index
 
 
 def build_index() -> Dict[str, int]:
     """
     Scan every model folder, hash anything not yet hashed, and populate the
-    in-memory index from the (now complete) on-disk cache. Run once at startup.
+    in-memory index from the on-disk cache. Safe to repeat after downloads.
     Returns a per-type count of files newly hashed this run.
     """
     counts: Dict[str, int] = {}
@@ -152,8 +167,15 @@ def build_index() -> Dict[str, int]:
             if not filepath:
                 continue
             key = cache_key(filepath)
-            already_hashed = load_index(key) is not None
             try:
+                # aria2 writes to the final filename before it finishes.
+                if os.path.exists(filepath + ".aria2"):
+                    forget(filepath)
+                    continue
+                previous = load_index(key)
+                already_hashed = bool(previous and previous.get("file") == _file_signature(filepath))
+                if not already_hashed:
+                    forget(filepath)
                 hash_model(filepath, key)
                 if not already_hashed:
                     counts[model_type] = counts.get(model_type, 0) + 1
@@ -161,6 +183,18 @@ def build_index() -> Dict[str, int]:
                 print(f"[ImageLab] Error hashing {filename}: {e}")
 
     return counts
+
+
+def watch_models() -> None:
+    """Downloads can finish long after ComfyUI starts; keep discovering them."""
+    while True:
+        try:
+            counts = build_index()
+            if counts:
+                print(f"[ImageLab] Hashed: {counts}")
+        except Exception as e:
+            print(f"[ImageLab] Error scanning models: {e}")
+        time.sleep(30)
 
 
 def get_snapshot() -> Tuple[str, List[Dict]]:

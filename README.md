@@ -5,7 +5,8 @@ everything here exists so the front end can ask a ComfyUI server three things it
 its own:
 
 - **What models are installed, and what are they?** `/imagelab/api/hashes` returns a SHA-256 index of
-  every model file, built in the background on startup. Hashes are what make a local file
+  every model file, scanned in the background at startup and every 30 seconds after each scan.
+  Incomplete aria2 downloads are skipped; changed files are rehashed. Hashes make a local file
   identifiable on CivitAI, which is where the previews, trigger words and base-model badges come
   from.
 - **Fetch this model.** `/imagelab/api/downloads` starts a CivitAI download, reports progress, and

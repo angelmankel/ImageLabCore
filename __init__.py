@@ -2,7 +2,7 @@
 ImageLabCore — ComfyUI custom node entrypoint.
 
 It:
-  - hashes all model files on startup (background) into an index
+  - hashes model files in the background, including later downloads
   - exposes that index + CivitAI download/delete over a small HTTP API
   - optionally auto-downloads models on startup (IMAGELAB_AUTO_DOWNLOAD)
 
@@ -58,21 +58,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 api.setup_routes()
 
 
-def _hash_on_startup():
-    print("[ImageLab] Building model-hash index in the background ...")
-    try:
-        counts = hashing.build_index()
-        if counts:
-            print(f"[ImageLab] Hashed: {counts}")
-        else:
-            print("[ImageLab] No new models to hash")
-        version, entries = hashing.get_snapshot()
-        print(f"[ImageLab] Index ready: {len(entries)} models (version {version})")
-    except Exception as e:
-        print(f"[ImageLab] Error during startup hashing: {e}")
-
-
-threading.Thread(target=_hash_on_startup, daemon=True).start()
+threading.Thread(target=hashing.watch_models, daemon=True).start()
 
 
 async def _auto_download_on_startup(_app):
