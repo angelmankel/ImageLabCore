@@ -163,6 +163,28 @@ async def _fetch_model(model_id: int) -> Dict:
             return await res.json()
 
 
+def _refusal(status: int, body: object) -> "CivitaiError":
+    """Turn a 401/403 from the download URL into CivitAI's actual reason.
+
+    A 403 is not always the token: Early Access models answer 403 with
+    {"error": "Early Access", "deadline": ...} to a perfectly valid key, and the old blanket
+    "needs a valid CIVITAI_API_KEY" sent people chasing a key that was fine.
+    """
+    info = body if isinstance(body, dict) else {}
+    reason = str(info.get("error") or "")
+    if reason.lower() == "early access":
+        deadline = str(info.get("deadline") or "")[:10]
+        when = f" It becomes free on {deadline}." if deadline else ""
+        return CivitaiError(
+            f"Early Access on CivitAI: the creator charges Buzz to download it now.{when}",
+            "EARLY_ACCESS", 403)
+    if status == 401 or not os.environ.get("CIVITAI_API_KEY"):
+        return CivitaiError("CivitAI rejected the API key (CIVITAI_API_KEY)", "AUTH_ERROR", 401)
+    detail = str(info.get("message") or reason or "").strip()
+    return CivitaiError(f"CivitAI refused the download{': ' + detail if detail else ' (HTTP 403)'}",
+                        "FORBIDDEN", 403)
+
+
 def _pick_file(version: Dict) -> Dict:
     """Choose the file to download — the primary, else the first safetensors."""
     files = version.get("files") or []
@@ -224,7 +246,11 @@ async def _run_download(version_id: int, folder: Optional[str], filename: Option
                 allow_redirects=True,
             ) as res:
                 if res.status in (401, 403):
-                    raise CivitaiError("Download requires a valid CIVITAI_API_KEY", "AUTH_ERROR", 401)
+                    try:
+                        body = await res.json(content_type=None)
+                    except Exception:
+                        body = None
+                    raise _refusal(res.status, body)
                 if res.status != 200:
                     raise CivitaiError(f"Download failed: HTTP {res.status}", "DOWNLOAD_FAILED", 502)
 
