@@ -1,5 +1,9 @@
 # ImageLabCore — the ComfyUI custom node
 
+**Every change Donny asks for ships at once, without asking:** push it to the running pod, then
+commit + push here, then move the pin in ImageLabDocker. Full rule: `../ImageLabDocker/CLAUDE.md`,
+rule 6.
+
 Adds an HTTP API to ComfyUI and no nodes at all. See `README.md` for the route table.
 
 **Changing it needs no image rebuild.** It lives on the pod's volume, symlinked into `custom_nodes`
