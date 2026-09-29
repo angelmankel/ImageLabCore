@@ -23,7 +23,7 @@ the mtime of `api.py`.
 
 ## Things to know
 
-- **Only `hashing`, `api`, `downloads` and `favorites` are imported.** `routes.py`, `workflows.py`,
+- **Only `hashing`, `api`, `downloads`, `favorites` and `model_sort` are imported.** `routes.py`, `workflows.py`,
   `imagelab_nodes.py`, `resources.py`, `civitai_routes.py`, `parameters.py` and
   `schema_generator.py` are reference only and deliberately not
   loaded. Editing one of those and seeing nothing change is an easy hour to lose.
@@ -33,6 +33,14 @@ the mtime of `api.py`.
   `server`, which are ComfyUI itself. There is no `requirements.txt` and adding one means the image
   build starts installing things.
 - **Every list endpoint is ETag'd.** Clients poll; 304 keeps that nearly free. Keep it that way.
+- **CivitAI calls every base model a "Checkpoint".** Wan / Flux / Z-Image / Qwen / Anima files are
+  usually the diffusion model alone and only `UNETLoader` (diffusion_models/) can load them.
+  `model_sort` reads the safetensors header: no text-encoder weights → moved to diffusion_models/
+  (after each download, at startup, `POST /models/sort`), hash carried over (`hashing.relocate`).
+- **Downloads use up to 8 Range connections** (`downloads._stream`), each part retried. One
+  connection from CivitAI ran ~1 MB/s; split, a 16 GB file took about two minutes on a pod.
+  `{url, folder}` downloads any https file (Hugging Face); `HF_TOKEN` is sent to huggingface.co.
+- Tests: `python -m unittest discover -s tests` (the download test needs aiohttp).
 
 **The project rules — pods, money, pulling images before a terminate — live in
 `../ImageLabDocker/CLAUDE.md`. Read that first.**

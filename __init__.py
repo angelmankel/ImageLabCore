@@ -48,6 +48,7 @@ from server import PromptServer
 from . import hashing
 from . import api
 from . import downloads
+from . import model_sort
 
 # No custom nodes yet — ComfyUI still expects these symbols to exist.
 NODE_CLASS_MAPPINGS = {}
@@ -58,7 +59,19 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 api.setup_routes()
 
 
-threading.Thread(target=hashing.watch_models, daemon=True).start()
+def _scan() -> None:
+    # Files CivitAI calls "Checkpoint" that are diffusion models only go to diffusion_models/
+    # before the first scan, so they are indexed where they can be loaded.
+    try:
+        moved = model_sort.sort_checkpoints()["moved"]
+        if moved:
+            print(f"[ImageLab] Sorted into diffusion_models/: {moved}")
+    except Exception as e:
+        print(f"[ImageLab] Sorting checkpoints failed: {e}")
+    hashing.watch_models()
+
+
+threading.Thread(target=_scan, daemon=True).start()
 
 
 async def _auto_download_on_startup(_app):

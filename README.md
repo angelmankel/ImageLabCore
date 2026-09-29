@@ -22,9 +22,11 @@ Every list endpoint is ETag'd, so a client that polls costs almost nothing.
 |---|---|---|
 | GET | `/imagelab/api/hashes` | model hash index; send `If-None-Match` to get a 304 |
 | GET | `/imagelab/api/downloads` | every tracked download, active or finished |
-| POST | `/imagelab/api/downloads` | start one — `{version_id, folder?, filename?}` |
+| POST | `/imagelab/api/downloads` | start one — `{version_id, folder?, filename?}` from CivitAI, or `{url, folder, filename?}` from any https URL (Hugging Face) |
 | DELETE | `/imagelab/api/downloads/{version_id}` | cancel, or dismiss a finished row |
 | DELETE | `/imagelab/api/models/{type}/{filename}` | delete a local model, drop it from the index |
+| GET | `/imagelab/api/models/inspect/{type}/{filename}` | what a safetensors file holds: name prefixes, VAE / text encoder inside |
+| POST | `/imagelab/api/models/sort` | move diffusion-model-only files out of `checkpoints/` (also runs at startup and after each download) |
 | GET | `/imagelab/api/favorites` | list; ETag'd |
 | POST | `/imagelab/api/favorites` | save `{filename, subfolder?, type?}` out of temp/ |
 | DELETE | `/imagelab/api/favorites/{date}/{filename}` | remove one |

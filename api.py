@@ -11,6 +11,7 @@ from server import PromptServer
 from . import hashing
 from . import downloads
 from . import favorites
+from . import model_sort
 
 
 def setup_routes() -> None:
@@ -51,6 +52,9 @@ def setup_routes() -> None:
         Start a CivitAI download.
 
             body: { version_id: int, folder?: str, filename?: str }
+               or { url: str, folder: str, filename?: str }   # any https URL, e.g. Hugging Face
+
+        A URL download's row is keyed by a stable negative id (`downloads.url_key`).
 
         `folder` is a ComfyUI folder name (e.g. "checkpoints"); omit it to let
         the destination be derived from CivitAI's model type. Returns
@@ -61,6 +65,14 @@ def setup_routes() -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON body", "code": "VALIDATION_ERROR"}, status=400)
+
+        # Any https URL (Hugging Face text encoders, VAEs…) into a named folder.
+        if body.get("url"):
+            try:
+                key = downloads.start_url_download(str(body["url"]), str(body.get("folder") or ""), body.get("filename"))
+            except downloads.CivitaiError as e:
+                return web.json_response({"error": e.message, "code": e.code}, status=e.status)
+            return web.json_response({"version_id": key, "status": "started"})
 
         version_id = body.get("version_id")
         if version_id is None:
@@ -102,6 +114,22 @@ def setup_routes() -> None:
         except downloads.CivitaiError as e:
             return web.json_response({"error": e.message, "code": e.code}, status=e.status)
         return web.json_response({"deleted": True})
+
+    @routes.get("/imagelab/api/models/inspect/{model_type}/{filename:.*}")
+    async def inspect_model(request: web.Request) -> web.Response:
+        """What a safetensors model holds (name prefixes, VAE / text encoder inside)."""
+        import folder_paths
+        path = folder_paths.get_full_path(request.match_info["model_type"], request.match_info["filename"])
+        info = model_sort.describe(path) if path else None
+        if info is None:
+            return web.json_response({"error": "Not a safetensors model here", "code": "NOT_FOUND"}, status=404)
+        return web.json_response(info)
+
+    @routes.post("/imagelab/api/models/sort")
+    async def sort_models(request: web.Request) -> web.Response:
+        """Move diffusion-model-only files out of checkpoints/ (see `model_sort`)."""
+        import asyncio
+        return web.json_response(await asyncio.to_thread(model_sort.sort_checkpoints))
 
     # -- favorites ---------------------------------------------------------
     #

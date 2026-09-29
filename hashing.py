@@ -221,3 +221,21 @@ def forget(filepath: str) -> None:
     with _LOCK:
         if _INDEX.pop(key, None) is not None:
             _VERSION = _compute_version(_INDEX)
+
+
+def relocate(old_path: str, new_path: str) -> None:
+    """
+    A model file was renamed on the same disk (`model_sort` moving it to diffusion_models/):
+    carry its hash over to the new path instead of reading gigabytes again. Size and mtime
+    survive a rename, so the signature still matches. Falls back to a fresh hash if the old
+    entry is missing or stale.
+    """
+    old_key, new_key = cache_key(old_path), cache_key(new_path)
+    previous = load_index(old_key)
+    forget(old_path)
+    if previous and previous.get("hash") and previous.get("file") == _file_signature(new_path):
+        entry = dict(previous, key=new_key, filename=os.path.basename(new_path))
+        save_index(new_key, entry)
+        _remember(entry)
+    else:
+        hash_model(new_path, new_key)

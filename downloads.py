@@ -18,10 +18,22 @@ version ids, CivitAI URLs, or `model:<id>` / `<folder>::<entry>` forms — see
 `parse_auto_download`. Queued from `__init__.py` once the server loop is up.
 
 Download/cancel/delete only, wired into the hash index in `hashing.py`.
+
+Files come down over up to `_PARTS` connections at once when the server takes Range requests
+(CivitAI's CDN and Hugging Face both do): one connection from CivitAI runs at about 1 MB/s, which
+made a 16 GB video model a four-hour wait. Each part retries on its own.
+
+Besides CivitAI versions, any https URL can be fetched into a named folder (`start_url_download`)
+— text encoders and VAEs live on Hugging Face, not CivitAI. `HF_TOKEN`, when set, is sent to
+huggingface.co for gated repos.
+
+A "Checkpoint" from CivitAI that turns out to be a diffusion model only is moved to
+`diffusion_models/` once it lands (`model_sort`).
 """
 import os
 import re
 import time
+import zlib
 import asyncio
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -30,6 +42,7 @@ import aiohttp
 import folder_paths
 
 from . import hashing
+from . import model_sort
 
 # Configurable for proxying / mirrors.
 CIVITAI_API_BASE = os.environ.get("CIVITAI_API_BASE", "https://civitai.com/api/v1")
@@ -52,6 +65,10 @@ MODEL_TYPE_TO_FOLDER = {
 _MODEL_EXTS = (".safetensors", ".pt", ".ckpt", ".bin", ".pth")
 # Record progress at most every this many bytes.
 _PROGRESS_STEP = 512 * 1024
+# Parallel connections for one file, and the smallest file worth splitting.
+_PARTS = 8
+_SPLIT_MIN = 64 * 1024 * 1024
+_PART_RETRIES = 4
 
 
 class CivitaiError(Exception):
@@ -195,10 +212,131 @@ def _pick_file(version: Dict) -> Dict:
     return primary or safet or files[0]
 
 
+def _host_headers(url: str) -> Dict[str, str]:
+    """Auth for the first request only: Hugging Face gated repos want HF_TOKEN; CivitAI takes
+    its token in the URL. Redirected CDN URLs are signed and get no header."""
+    hf = os.environ.get("HF_TOKEN")
+    if hf and re.match(r"https://([\w.-]+\.)?huggingface\.co/", url):
+        return {"Authorization": f"Bearer {hf}"}
+    return {}
+
+
+async def _stream(url: str, headers: Dict[str, str], target_path: str, progress: DownloadProgress,
+                  civitai: bool = False) -> bool:
+    """
+    Download `url` to `target_path` (via `<target>.downloading`, renamed into place at the end).
+    Splits into `_PARTS` Range requests when the server allows it, else one stream. Returns False
+    if the download was cancelled (the partial file is removed), True when the file is in place.
+    """
+    key = progress.version_id
+    temp_path = target_path + ".downloading"
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    timeout = aiohttp.ClientTimeout(total=None, connect=30, sock_read=120)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # Probe with a one-byte range: follows redirects to the real (signed) URL and says whether
+        # the server takes ranges and how big the file is.
+        async with session.get(url, headers={**headers, "Range": "bytes=0-0"}, allow_redirects=True) as res:
+            if res.status in (401, 403):
+                try:
+                    body = await res.json(content_type=None)
+                except Exception:
+                    body = None
+                if civitai:
+                    raise _refusal(res.status, body)
+                raise CivitaiError(f"Refused (HTTP {res.status}) — gated? Set HF_TOKEN for Hugging Face.", "FORBIDDEN", res.status)
+            if res.status not in (200, 206):
+                raise CivitaiError(f"Download failed: HTTP {res.status}", "DOWNLOAD_FAILED", 502)
+            final_url = str(res.url)
+            total = 0
+            ranged = res.status == 206
+            if ranged:
+                m = re.search(r"/(\d+)$", res.headers.get("Content-Range", ""))
+                total = int(m.group(1)) if m else 0
+            else:
+                total = int(res.headers.get("Content-Length") or 0)
+            if res.status == 206:
+                await res.read()
+        if total:
+            progress.total_bytes = total
+
+        cancelled = lambda: key in _cancelled  # noqa: E731
+        progress.downloaded_bytes = 0
+
+        if not (ranged and total >= _SPLIT_MIN):
+            # One stream from the start. The probe's redirect target is reused when there was one.
+            async with session.get(final_url if ranged else url, headers={} if ranged else headers, allow_redirects=True) as res:
+                if res.status != 200:
+                    raise CivitaiError(f"Download failed: HTTP {res.status}", "DOWNLOAD_FAILED", 502)
+                last_mark = 0
+                with open(temp_path, "wb") as fh:
+                    async for chunk in res.content.iter_chunked(1 << 20):
+                        if cancelled():
+                            break
+                        fh.write(chunk)
+                        progress.downloaded_bytes += len(chunk)
+                        if progress.downloaded_bytes - last_mark >= _PROGRESS_STEP:
+                            last_mark = progress.downloaded_bytes
+                            progress.updated_at = time.time()
+        else:
+            with open(temp_path, "wb") as fh:
+                fh.truncate(total)
+            step = -(-total // _PARTS)
+
+            async def part(start: int, end: int) -> None:
+                pos = start
+                for attempt in range(_PART_RETRIES):
+                    try:
+                        async with session.get(final_url, headers={"Range": f"bytes={pos}-{end}"}) as res:
+                            if res.status != 206:
+                                raise CivitaiError(f"Part {start}: HTTP {res.status}", "DOWNLOAD_FAILED", 502)
+                            with open(temp_path, "r+b") as fh:
+                                fh.seek(pos)
+                                async for chunk in res.content.iter_chunked(1 << 20):
+                                    if cancelled():
+                                        return
+                                    fh.write(chunk)
+                                    pos += len(chunk)
+                                    progress.downloaded_bytes += len(chunk)
+                                    progress.updated_at = time.time()
+                        if pos > end:
+                            return
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                        if attempt == _PART_RETRIES - 1:
+                            raise CivitaiError(f"Download failed after {_PART_RETRIES} tries: {e}", "DOWNLOAD_FAILED", 502)
+                        await asyncio.sleep(2 * (attempt + 1))
+                if pos <= end and not cancelled():
+                    raise CivitaiError("Download ended early", "DOWNLOAD_FAILED", 502)
+
+            parts = [asyncio.create_task(part(i, min(total, i + step) - 1)) for i in range(0, total, step)]
+            try:
+                await asyncio.gather(*parts)
+            except BaseException:
+                # One part failed (or the whole download was cancelled): stop the others before
+                # the caller removes the file they are writing to.
+                for t in parts:
+                    t.cancel()
+                await asyncio.gather(*parts, return_exceptions=True)
+                raise
+
+    if key in _cancelled:
+        progress.status = "cancelled"
+        progress.updated_at = time.time()
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return False
+    if total and os.path.getsize(temp_path) != total:
+        raise CivitaiError("Downloaded size does not match", "DOWNLOAD_FAILED", 502)
+    # Atomically swap the completed file into place.
+    os.replace(temp_path, target_path)
+    return True
+
+
 async def _run_download(version_id: int, folder: Optional[str], filename: Optional[str]) -> None:
     """The actual streamed download. Runs as a background task; updates `_progress`."""
     progress = _progress[version_id]
     target_dir: Optional[str] = None
+    forced_folder = folder is not None
 
     try:
         version = await _fetch_version(version_id)
@@ -220,6 +358,13 @@ async def _run_download(version_id: int, folder: Optional[str], filename: Option
 
         target_path = os.path.join(target_dir, name)
 
+        # A diffusion model downloaded before was moved out of checkpoints/: that counts too.
+        if folder == "checkpoints" and not forced_folder and not os.path.exists(target_path):
+            sorted_dir = model_sort.diffusion_models_dir()
+            if sorted_dir and os.path.exists(os.path.join(sorted_dir, name)):
+                target_path = os.path.join(sorted_dir, name)
+                progress.folder = "diffusion_models"
+
         # Already on disk (persistent volume / re-run) — just make sure it's indexed.
         if os.path.exists(target_path):
             size = os.path.getsize(target_path)
@@ -230,53 +375,20 @@ async def _run_download(version_id: int, folder: Optional[str], filename: Option
             print(f"[ImageLab] {name} already present — skipped")
             return
 
-        temp_path = target_path + ".downloading"
         download_url = file_info.get("downloadUrl") or f"{CIVITAI_DOWNLOAD_BASE}/{version_id}"
         token = _token()
         if token:
             download_url += ("&" if "?" in download_url else "?") + f"token={token}"
 
-        os.makedirs(target_dir, exist_ok=True)
-        last_mark = 0
+        if not await _stream(download_url, {}, target_path, progress, civitai=True):
+            return  # cancelled
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                download_url,
-                timeout=aiohttp.ClientTimeout(total=None, connect=30),
-                allow_redirects=True,
-            ) as res:
-                if res.status in (401, 403):
-                    try:
-                        body = await res.json(content_type=None)
-                    except Exception:
-                        body = None
-                    raise _refusal(res.status, body)
-                if res.status != 200:
-                    raise CivitaiError(f"Download failed: HTTP {res.status}", "DOWNLOAD_FAILED", 502)
-
-                content_length = res.headers.get("Content-Length")
-                if content_length:
-                    progress.total_bytes = int(content_length)
-
-                with open(temp_path, "wb") as fh:
-                    async for chunk in res.content.iter_chunked(65536):
-                        if version_id in _cancelled:
-                            progress.status = "cancelled"
-                            progress.updated_at = time.time()
-                            fh.close()
-                            if os.path.exists(temp_path):
-                                os.remove(temp_path)
-                            return
-                        fh.write(chunk)
-                        progress.downloaded_bytes += len(chunk)
-                        if progress.downloaded_bytes - last_mark >= _PROGRESS_STEP:
-                            last_mark = progress.downloaded_bytes
-                            progress.updated_at = time.time()
-
-        # Atomically swap the completed file into place.
-        if os.path.exists(target_path):
-            os.remove(target_path)
-        os.rename(temp_path, target_path)
+        # CivitAI calls every base model a Checkpoint; a diffusion model alone belongs elsewhere.
+        if folder == "checkpoints" and not forced_folder:
+            moved = await asyncio.to_thread(model_sort.sort_file, target_path)
+            if moved:
+                target_path = moved
+                progress.folder = "diffusion_models"
 
         # Hash it into the index so it shows up in /imagelab/api/hashes right away.
         # hash_model is blocking (reads the whole file) — keep it off the loop.
@@ -348,6 +460,64 @@ def start_download(version_id: int, folder: Optional[str] = None, filename: Opti
         status="downloading",
     )
     _tasks[version_id] = asyncio.create_task(_run_download(version_id, folder, filename))
+
+
+def url_key(url: str) -> int:
+    """Download rows are keyed by CivitAI version id; a URL gets a stable negative id instead."""
+    return -(zlib.crc32(url.encode()) & 0x7FFFFFFF) - 1
+
+
+async def _run_url_download(key: int, url: str, folder: str, name: str) -> None:
+    progress = _progress[key]
+    target_dir = _target_dir(folder)
+    try:
+        target_path = os.path.join(target_dir, name)
+        if os.path.exists(target_path):
+            progress.downloaded_bytes = progress.total_bytes = os.path.getsize(target_path)
+        elif not await _stream(url, _host_headers(url), target_path, progress):
+            return  # cancelled
+        await asyncio.to_thread(hashing.hash_model, target_path)
+        progress.status = "completed"
+        progress.updated_at = time.time()
+        print(f"[ImageLab] Downloaded {folder}/{name}")
+    except asyncio.CancelledError:
+        progress.status = "cancelled"
+        progress.updated_at = time.time()
+        _cleanup_temp(target_dir, name)
+        raise
+    except Exception as e:  # noqa: BLE001 — surface any failure to the panel
+        progress.status = "failed"
+        progress.error = e.message if isinstance(e, CivitaiError) else str(e)
+        progress.updated_at = time.time()
+        _cleanup_temp(target_dir, name)
+        print(f"[ImageLab] Download failed ({url}): {progress.error}")
+    finally:
+        _cancelled.discard(key)
+        _tasks.pop(key, None)
+
+
+def start_url_download(url: str, folder: str, filename: Optional[str] = None) -> int:
+    """
+    Download any https URL (Hugging Face, mostly) into a ComfyUI folder. Returns the row's key.
+    The name defaults to the URL's last path segment.
+    """
+    if not re.match(r"https?://", url or ""):
+        raise CivitaiError("url must be http(s)", "VALIDATION_ERROR", 400)
+    if folder not in folder_paths.folder_names_and_paths:
+        raise CivitaiError(f"Unknown folder: {folder}", "VALIDATION_ERROR", 400)
+    _target_dir(folder)
+    name = os.path.basename(filename or url.split("?", 1)[0].rstrip("/"))
+    if not name or not name.endswith(_MODEL_EXTS):
+        raise CivitaiError("Give a filename ending in a model extension", "VALIDATION_ERROR", 400)
+    key = url_key(url)
+    existing = _tasks.get(key)
+    if existing and not existing.done():
+        raise CivitaiError(f"{name} is already downloading", "ALREADY_RUNNING", 409)
+    _cancelled.discard(key)
+    _progress[key] = DownloadProgress(version_id=key, model_id=0, folder=folder, filename=name,
+                                      downloaded_bytes=0, total_bytes=0, status="downloading")
+    _tasks[key] = asyncio.create_task(_run_url_download(key, url, folder, name))
+    return key
 
 
 def cancel_download(version_id: int) -> Dict[str, bool]:
