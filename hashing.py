@@ -29,6 +29,7 @@ INDEX_DIR = os.path.join(os.path.dirname(__file__), "model_index")
 MODEL_TYPES = [
     "checkpoints", "loras", "vae", "embeddings", "upscale_models",
     "controlnet", "clip", "clip_vision", "diffusion_models",
+    "unet_gguf",  # ComfyUI-GGUF: the .gguf files in diffusion_models/
 ]
 
 # In-memory snapshot of every known model: cache_key -> index dict.

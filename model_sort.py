@@ -13,6 +13,11 @@ encoded — and moves to `diffusion_models/`, where `UNETLoader` reads it (a bun
 ignored there). The move is a rename on the
 same disk, so the hash index is carried over rather than recomputed (`hashing.relocate`).
 
+A GGUF file (a quantized model, `GGUF` in its first four bytes) is a diffusion model too, but it
+loads through ComfyUI-GGUF's `UnetLoaderGGUF`, which lists only `.gguf` files in diffusion_models/.
+It moves there, and a name that hides it (`x.gguf.safetensors`, from an older downloader) goes back
+to `.gguf`.
+
 Runs after each download into `checkpoints/`, once at startup over the whole folder, and on
 `POST /imagelab/api/models/sort`.
 """
@@ -30,6 +35,23 @@ _VAE_PREFIXES = ("first_stage_model.", "vae.")
 _TEXT_PREFIXES = ("cond_stage_model.", "conditioner.", "text_encoders.", "text_encoder.", "clip.")
 # A header larger than this is not a safetensors header.
 _MAX_HEADER = 100 * 1024 * 1024
+
+
+def is_gguf(path: str) -> bool:
+    """True when the file is GGUF, whatever its name says."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
+def gguf_name(name: str) -> str:
+    """The name a GGUF file should have: `x.gguf.safetensors` / `x.safetensors` -> `x.gguf`."""
+    if name.endswith(".gguf"):
+        return name
+    stem = name[: -len(".safetensors")] if name.endswith(".safetensors") else name
+    return stem if stem.endswith(".gguf") else stem + ".gguf"
 
 
 def safetensors_keys(path: str) -> Optional[List[str]]:
@@ -96,28 +118,38 @@ def sort_file(path: str) -> Optional[str]:
     """
     If `path` (in checkpoints/) is a diffusion model only, move it to diffusion_models/ and
     return the new path. Otherwise leave it and return None. Never overwrites a file.
+    A GGUF file moves too, under its `.gguf` name.
     """
-    keys = safetensors_keys(path)
-    if keys is None or not is_diffusion_only(keys):
-        return None
+    name = os.path.basename(path)
+    if is_gguf(path):
+        name = gguf_name(name)
+    else:
+        keys = safetensors_keys(path)
+        if keys is None or not is_diffusion_only(keys):
+            return None
     target_dir = diffusion_models_dir()
     if not target_dir:
         return None
     os.makedirs(target_dir, exist_ok=True)
-    target = os.path.join(target_dir, os.path.basename(path))
+    target = os.path.join(target_dir, name)
     if os.path.exists(target):
         print(f"[ImageLab] {os.path.basename(path)} is a diffusion model, but diffusion_models/ already has one by that name — left in checkpoints/")
         return None
     os.replace(path, target)
     hashing.relocate(path, target)
-    print(f"[ImageLab] Moved {os.path.basename(path)} to diffusion_models/ (no VAE or text encoder inside)")
+    print(f"[ImageLab] Moved {os.path.basename(path)} to diffusion_models/{name} (a diffusion model only)")
     return target
 
 
 def sort_checkpoints() -> Dict[str, List[str]]:
     """Move every diffusion-model-only file out of checkpoints/. Returns `{moved: [names]}`."""
     moved: List[str] = []
-    for name in folder_paths.get_filename_list("checkpoints"):
+    # checkpoints/ does not list .gguf files, so look for those on disk.
+    names = list(folder_paths.get_filename_list("checkpoints"))
+    for base in (folder_paths.folder_names_and_paths.get("checkpoints") or ([],))[0]:
+        if os.path.isdir(base):
+            names += [n for n in sorted(os.listdir(base)) if n.endswith(".gguf") and n not in names]
+    for name in names:
         path = folder_paths.get_full_path("checkpoints", name)
         if not path or os.path.exists(path + ".aria2") or not os.path.isfile(path):
             continue

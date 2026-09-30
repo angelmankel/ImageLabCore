@@ -98,6 +98,18 @@ class ModelSortTests(unittest.TestCase):
         self.assertEqual(ms.sort_checkpoints(), {"moved": []})
         self.assertEqual((self.models / "diffusion_models" / "wan.safetensors").read_bytes(), b"other")
 
+    def test_gguf_moves_under_its_own_name(self):
+        ms = self.m["model_sort"]
+        # An older downloader named CivitAI's x.gguf "x.gguf.safetensors"; checkpoints/ does not
+        # even list a real .gguf. Both are diffusion models for UnetLoaderGGUF.
+        (self.models / "checkpoints" / "wanQ8H.gguf.safetensors").write_bytes(b"GGUF\x03\x00\x00\x00rest")
+        (self.models / "checkpoints" / "wanQ8L.gguf").write_bytes(b"GGUF\x03\x00\x00\x00rest")
+        result = ms.sort_checkpoints()
+        self.assertEqual(sorted(result["moved"]), ["wanQ8H.gguf.safetensors", "wanQ8L.gguf"])
+        self.assertEqual(sorted(p.name for p in (self.models / "diffusion_models").iterdir()), ["wanQ8H.gguf", "wanQ8L.gguf"])
+        self.assertEqual(list((self.models / "checkpoints").iterdir()), [])
+        self.assertEqual(ms.gguf_name("a.safetensors"), "a.gguf")
+
     @unittest.skipUnless(importlib.util.find_spec("aiohttp"), "aiohttp not installed")
     def test_download_in_parts_and_in_one_stream(self):
         from aiohttp import web

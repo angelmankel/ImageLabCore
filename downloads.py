@@ -62,7 +62,7 @@ MODEL_TYPE_TO_FOLDER = {
     "MotionModule": "animatediff_motion_lora",
 }
 
-_MODEL_EXTS = (".safetensors", ".pt", ".ckpt", ".bin", ".pth")
+_MODEL_EXTS = (".safetensors", ".pt", ".ckpt", ".bin", ".pth", ".sft", ".gguf")
 # Record progress at most every this many bytes.
 _PROGRESS_STEP = 512 * 1024
 # Parallel connections for one file, and the smallest file worth splitting.
