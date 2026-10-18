@@ -137,6 +137,28 @@ def _target_dir(folder: str) -> str:
     return first
 
 
+def _invalidate_folder_cache(folder: Optional[str]) -> None:
+    """Drop ComfyUI's cached filename list for a folder so a just-added file shows in /object_info.
+
+    ComfyUI caches each folder's listing. Some builds only re-scan when a directory's mtime looks
+    changed, so a freshly downloaded LoRA (or any model) could stay missing from the model pickers
+    until a restart. Popping the cache entry forces the next `get_filename_list` to re-scan. Written
+    to tolerate every folder_paths version: a missing attribute or a changed shape is a no-op.
+    """
+    if not folder:
+        return
+    for attr in ("filename_list_cache", "cache"):
+        cache = getattr(folder_paths, attr, None)
+        if isinstance(cache, dict):
+            cache.pop(folder, None)
+    helper = getattr(folder_paths, "cache_helper", None)
+    try:
+        if helper is not None and hasattr(helper, "pop"):
+            helper.pop(folder, None)
+    except Exception:  # noqa: BLE001 — a cache clear must never break a finished download.
+        pass
+
+
 def _folder_for_type(civitai_type: str) -> str:
     """Map a CivitAI model type ('Checkpoint', 'LORA', …) to a ComfyUI folder."""
     folder = MODEL_TYPE_TO_FOLDER.get(civitai_type)
@@ -372,6 +394,7 @@ async def _run_download(version_id: int, folder: Optional[str], filename: Option
             progress.status = "completed"
             progress.updated_at = time.time()
             await asyncio.to_thread(hashing.hash_model, target_path)
+            _invalidate_folder_cache(progress.folder)
             print(f"[ImageLab] {name} already present — skipped")
             return
 
@@ -393,6 +416,13 @@ async def _run_download(version_id: int, folder: Optional[str], filename: Option
         # Hash it into the index so it shows up in /imagelab/api/hashes right away.
         # hash_model is blocking (reads the whole file) — keep it off the loop.
         await asyncio.to_thread(hashing.hash_model, target_path)
+
+        # Clear ComfyUI's cached folder listing so the new file appears in /object_info (and so the
+        # app's model/LoRA pickers) without waiting for a restart. Clear both the folder it landed
+        # in and `progress.folder`: model_sort may have moved a checkpoint to diffusion_models/, so
+        # the source list is stale too.
+        _invalidate_folder_cache(folder)
+        _invalidate_folder_cache(progress.folder)
 
         progress.status = "completed"
         progress.updated_at = time.time()
@@ -477,6 +507,7 @@ async def _run_url_download(key: int, url: str, folder: str, name: str) -> None:
         elif not await _stream(url, _host_headers(url), target_path, progress):
             return  # cancelled
         await asyncio.to_thread(hashing.hash_model, target_path)
+        _invalidate_folder_cache(folder)
         progress.status = "completed"
         progress.updated_at = time.time()
         print(f"[ImageLab] Downloaded {folder}/{name}")
