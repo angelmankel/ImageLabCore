@@ -31,6 +31,8 @@ Every list endpoint is ETag'd, so a client that polls costs almost nothing.
 | POST | `/imagelab/api/favorites` | save `{filename, subfolder?, type?}` out of temp/ |
 | DELETE | `/imagelab/api/favorites/{date}/{filename}` | remove one |
 | GET | `/imagelab/api/favorites/view` | the image bytes for one favorite |
+| GET | `/imagelab/api/preview-size` | the cap on sampler previews (long side, px); `unlimited: true` = render size |
+| POST | `/imagelab/api/preview-size` | `{size}`: `64..8192`, or `0` / `"max"` for no cap. Takes effect at once, no restart |
 
 ## Install
 
@@ -45,6 +47,7 @@ Read from the process environment, or from a `.env` beside this file (the enviro
 |---|---|
 | `CIVITAI_API_KEY` | CivitAI token. Downloads 401 without it. |
 | `IMAGELAB_AUTO_DOWNLOAD` | model ids to fetch on startup |
+| `IMAGELAB_PREVIEW_SIZE` | Sampler preview cap at start. Default: 1024, or ComfyUI's `--preview-size` if that is larger. `0` = no cap. |
 | `IMAGELAB_CORE_SECONDARY` | `1` on a second ComfyUI that shares `models/` with the first: no hash scan, no checkpoint sort, no startup downloads, and only the favorites and version routes. One process must own the index and the downloads. |
 
 `CIVITAI_API_KEY` is the same name the pod image and the project `.env` use.

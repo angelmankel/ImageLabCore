@@ -12,6 +12,7 @@ from . import hashing
 from . import downloads
 from . import favorites
 from . import model_sort
+from . import preview
 
 
 def setup_routes(secondary: bool = False) -> None:
@@ -234,5 +235,28 @@ def setup_routes(secondary: bool = False) -> None:
             "source": os.path.dirname(os.path.abspath(__file__)),
             "api_mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(__file__))),
         })
+
+    # -- live preview size -------------------------------------------------
+    # The cap ComfyUI puts on each sampler preview, changeable while it runs (see preview.py).
+
+    def _preview_body() -> dict:
+        size = preview.get()
+        return {"size": size, "unlimited": preview.is_unlimited(size), "default": preview.DEFAULT,
+                "min": preview.MIN, "max": preview.MAX}
+
+    @routes.get("/imagelab/api/preview-size")
+    async def get_preview_size(request: web.Request) -> web.Response:
+        return web.json_response(_preview_body())
+
+    @routes.post("/imagelab/api/preview-size")
+    async def set_preview_size(request: web.Request) -> web.Response:
+        """Body `{"size": 2048}`; `0` or `"max"` lifts the cap (previews come at render size)."""
+        try:
+            body = await request.json()
+            preview.set_size(body["size"])
+        except (ValueError, KeyError, TypeError) as e:
+            return web.json_response({"error": f"bad size: {e}"}, status=400)
+        print(f"[ImageLab] preview size -> {preview.get()}")
+        return web.json_response(_preview_body())
 
     print("[ImageLab] API routes registered" + (" (secondary: favorites + version only)" if secondary else ""))

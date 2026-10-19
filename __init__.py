@@ -49,6 +49,7 @@ from . import hashing
 from . import api
 from . import downloads
 from . import model_sort
+from . import preview
 
 # No custom nodes yet — ComfyUI still expects these symbols to exist.
 NODE_CLASS_MAPPINGS = {}
@@ -64,6 +65,9 @@ SECONDARY = os.environ.get("IMAGELAB_CORE_SECONDARY", "").strip().lower() in ("1
 # Register the HTTP API (synchronous — routes must exist before the server
 # finishes starting; this is just dict insertion, it does not block).
 api.setup_routes(secondary=SECONDARY)
+
+# Previews at 1024 (or IMAGELAB_PREVIEW_SIZE) instead of ComfyUI's 512; POST /imagelab/api/preview-size moves it live.
+print(f"[ImageLab] preview size {preview.apply_env()}")
 
 
 def _scan() -> None:
