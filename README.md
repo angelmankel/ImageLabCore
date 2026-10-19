@@ -45,6 +45,7 @@ Read from the process environment, or from a `.env` beside this file (the enviro
 |---|---|
 | `CIVITAI_API_KEY` | CivitAI token. Downloads 401 without it. |
 | `IMAGELAB_AUTO_DOWNLOAD` | model ids to fetch on startup |
+| `IMAGELAB_CORE_SECONDARY` | `1` on a second ComfyUI that shares `models/` with the first: no hash scan, no checkpoint sort, no startup downloads, and only the favorites and version routes. One process must own the index and the downloads. |
 
 `CIVITAI_API_KEY` is the same name the pod image and the project `.env` use.
 

@@ -54,9 +54,16 @@ from . import model_sort
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
+# A pod can run a second ComfyUI (for video) on the same models/, custom_nodes/ and this
+# directory. Only one process may scan, sort and download: two would hash the same gigabytes twice,
+# rename the same checkpoint at once and fetch the same file into the same `.downloading` path.
+# ImageLabDocker's start.sh sets IMAGELAB_CORE_SECONDARY=1 on the second one, which then does no
+# background work and serves only favorites (they read its own temp/).
+SECONDARY = os.environ.get("IMAGELAB_CORE_SECONDARY", "").strip().lower() in ("1", "true", "yes")
+
 # Register the HTTP API (synchronous — routes must exist before the server
 # finishes starting; this is just dict insertion, it does not block).
-api.setup_routes()
+api.setup_routes(secondary=SECONDARY)
 
 
 def _scan() -> None:
@@ -71,7 +78,8 @@ def _scan() -> None:
     hashing.watch_models()
 
 
-threading.Thread(target=_scan, daemon=True).start()
+if not SECONDARY:
+    threading.Thread(target=_scan, daemon=True).start()
 
 
 async def _auto_download_on_startup(_app):
@@ -84,6 +92,7 @@ async def _auto_download_on_startup(_app):
 
 
 # Defer auto-downloads until the server's event loop is running.
-PromptServer.instance.app.on_startup.append(_auto_download_on_startup)
+if not SECONDARY:
+    PromptServer.instance.app.on_startup.append(_auto_download_on_startup)
 
-print("[ImageLabCore] loaded")
+print("[ImageLabCore] loaded" + (" as secondary (no scan, no downloads)" if SECONDARY else ""))

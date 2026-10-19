@@ -40,6 +40,11 @@ the mtime of `api.py`.
 - **Downloads use up to 8 Range connections** (`downloads._stream`), each part retried. One
   connection from CivitAI ran ~1 MB/s; split, a 16 GB file took about two minutes on a pod.
   `{url, folder}` downloads any https file (Hugging Face); `HF_TOKEN` is sent to huggingface.co.
+- **A pod may run two ComfyUIs on one `models/` and one copy of this node** (the second is for
+  video, at `/video-comfy/`). The second gets `IMAGELAB_CORE_SECONDARY=1`: it scans nothing,
+  sorts nothing, downloads nothing, and serves only favorites + version (favorites read *its*
+  temp/). nginx sends its other `/imagelab/api/*` requests to the first. `/imagelab/api/version`
+  says `"secondary": true|false`.
 - Tests: `python -m unittest discover -s tests` (the download test needs aiohttp).
 
 **The project rules — pods, money, pulling images before a terminate — live in

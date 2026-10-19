@@ -14,13 +14,20 @@ from . import favorites
 from . import model_sort
 
 
-def setup_routes() -> None:
-    """Register API routes with the running ComfyUI server."""
+def setup_routes(secondary: bool = False) -> None:
+    """Register API routes with the running ComfyUI server.
+
+    `secondary`: this is the pod's second ComfyUI, on the same models/. The hash index, downloads
+    and model routes belong to the first one (nginx sends them there); their copies here go into a
+    table nobody serves, so a stray request cannot start a second download of the same file. Only
+    favorites (which read this process's own temp/) and the version route are served.
+    """
     routes = PromptServer.instance.routes
+    owner = web.RouteTableDef() if secondary else routes
 
     # -- model hash index --------------------------------------------------
 
-    @routes.get("/imagelab/api/hashes")
+    @owner.get("/imagelab/api/hashes")
     async def get_hashes(request: web.Request) -> web.Response:
         """
         Return the full model-hash cache in one shot:
@@ -46,7 +53,7 @@ def setup_routes() -> None:
 
     # -- CivitAI downloads -------------------------------------------------
 
-    @routes.post("/imagelab/api/downloads")
+    @owner.post("/imagelab/api/downloads")
     async def start_download(request: web.Request) -> web.Response:
         """
         Start a CivitAI download.
@@ -90,12 +97,12 @@ def setup_routes() -> None:
 
         return web.json_response({"version_id": int(version_id), "status": "started"})
 
-    @routes.get("/imagelab/api/downloads")
+    @owner.get("/imagelab/api/downloads")
     async def list_downloads(request: web.Request) -> web.Response:
         """List every tracked download -- active, completed, failed, cancelled."""
         return web.json_response({"downloads": downloads.list_downloads()})
 
-    @routes.delete("/imagelab/api/downloads/{version_id}")
+    @owner.delete("/imagelab/api/downloads/{version_id}")
     async def cancel_download(request: web.Request) -> web.Response:
         """Cancel an in-flight download, or dismiss a finished/failed row."""
         try:
@@ -106,7 +113,7 @@ def setup_routes() -> None:
 
     # -- local model deletion ---------------------------------------------
 
-    @routes.delete("/imagelab/api/models/{model_type}/{filename:.*}")
+    @owner.delete("/imagelab/api/models/{model_type}/{filename:.*}")
     async def delete_model(request: web.Request) -> web.Response:
         """Delete a local model file and drop it from the hash index."""
         try:
@@ -115,7 +122,7 @@ def setup_routes() -> None:
             return web.json_response({"error": e.message, "code": e.code}, status=e.status)
         return web.json_response({"deleted": True})
 
-    @routes.get("/imagelab/api/models/inspect/{model_type}/{filename:.*}")
+    @owner.get("/imagelab/api/models/inspect/{model_type}/{filename:.*}")
     async def inspect_model(request: web.Request) -> web.Response:
         """What a safetensors model holds (name prefixes, VAE / text encoder inside)."""
         import folder_paths
@@ -125,7 +132,7 @@ def setup_routes() -> None:
             return web.json_response({"error": "Not a safetensors model here", "code": "NOT_FOUND"}, status=404)
         return web.json_response(info)
 
-    @routes.post("/imagelab/api/models/sort")
+    @owner.post("/imagelab/api/models/sort")
     async def sort_models(request: web.Request) -> web.Response:
         """Move diffusion-model-only files out of checkpoints/ (see `model_sort`)."""
         import asyncio
@@ -223,8 +230,9 @@ def setup_routes() -> None:
 
         return web.json_response({
             "name": "ImageLabCore",
+            "secondary": secondary,
             "source": os.path.dirname(os.path.abspath(__file__)),
             "api_mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(os.path.getmtime(__file__))),
         })
 
-    print("[ImageLab] API routes registered")
+    print("[ImageLab] API routes registered" + (" (secondary: favorites + version only)" if secondary else ""))
