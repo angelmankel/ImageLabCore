@@ -23,7 +23,7 @@ the mtime of `api.py`.
 
 ## Things to know
 
-- **Only `hashing`, `api`, `downloads`, `favorites` and `model_sort` are imported.** `routes.py`, `workflows.py`,
+- **Only `hashing`, `api`, `downloads`, `favorites`, `model_sort`, `preview` and `batch_preview` are imported.** `batch_preview` patches ComfyUI's previewer so a batch's live preview is all N pictures side by side in one frame (the web app cuts it into tiles; `IMAGELAB_BATCH_PREVIEW=0` turns it off). `routes.py`, `workflows.py`,
   `imagelab_nodes.py`, `resources.py`, `civitai_routes.py`, `parameters.py` and
   `schema_generator.py` are reference only and deliberately not
   loaded. Editing one of those and seeing nothing change is an easy hour to lose.

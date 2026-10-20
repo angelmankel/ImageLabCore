@@ -50,6 +50,7 @@ from . import api
 from . import downloads
 from . import model_sort
 from . import preview
+from . import batch_preview
 
 # No custom nodes yet — ComfyUI still expects these symbols to exist.
 NODE_CLASS_MAPPINGS = {}
@@ -68,6 +69,9 @@ api.setup_routes(secondary=SECONDARY)
 
 # Previews at 1024 (or IMAGELAB_PREVIEW_SIZE) instead of ComfyUI's 512; POST /imagelab/api/preview-size moves it live.
 print(f"[ImageLab] preview size {preview.apply_env()}")
+
+# A batch's live preview shows every picture (side by side in one frame), not just the first.
+print(f"[ImageLab] batch preview {'on' if batch_preview.install() else 'off'}")
 
 
 def _scan() -> None:
