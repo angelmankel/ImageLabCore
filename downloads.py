@@ -93,6 +93,10 @@ class DownloadProgress:
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    # What the download was started with, so `retry_download` can start it again: the https URL
+    # of a URL download (None for a CivitAI version) and the folder / filename the caller asked for.
+    url: Optional[str] = None
+    requested: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         percent = round(self.downloaded_bytes / self.total_bytes * 100, 1) if self.total_bytes else 0.0
@@ -108,6 +112,7 @@ class DownloadProgress:
             "error": self.error,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
+            "url": self.url,
         }
 
 
@@ -492,6 +497,7 @@ def start_download(version_id: int, folder: Optional[str] = None, filename: Opti
         downloaded_bytes=0,
         total_bytes=0,
         status="downloading",
+        requested={"folder": folder, "filename": filename},
     )
     _tasks[version_id] = asyncio.create_task(_run_download(version_id, folder, filename))
 
@@ -550,7 +556,8 @@ def start_url_download(url: str, folder: str, filename: Optional[str] = None) ->
         raise CivitaiError(f"{name} is already downloading", "ALREADY_RUNNING", 409)
     _cancelled.discard(key)
     _progress[key] = DownloadProgress(version_id=key, model_id=0, folder=folder, filename=name,
-                                      downloaded_bytes=0, total_bytes=0, status="downloading")
+                                      downloaded_bytes=0, total_bytes=0, status="downloading",
+                                      url=url, requested={"folder": folder, "filename": filename})
     _tasks[key] = asyncio.create_task(_run_url_download(key, url, folder, name))
     return key
 
@@ -570,6 +577,25 @@ def cancel_download(version_id: int) -> Dict[str, bool]:
         del _progress[version_id]
         return {"cancelled": False, "cleared": True}
     return {"cancelled": False, "cleared": False}
+
+
+def retry_download(version_id: int) -> int:
+    """
+    Start a failed / cancelled / finished row again with what it was started with (the same
+    CivitAI version or URL, folder and filename). Returns the row's key. Raises CivitaiError
+    (404 unknown row, 409 still running, or whatever starting it raises).
+    """
+    progress = _progress.get(version_id)
+    if progress is None:
+        raise CivitaiError(f"No download {version_id}", "NOT_FOUND", 404)
+    task = _tasks.get(version_id)
+    if task and not task.done():
+        raise CivitaiError(f"{progress.filename} is still downloading", "ALREADY_RUNNING", 409)
+    req = progress.requested or {}
+    if progress.url:
+        return start_url_download(progress.url, req.get("folder") or progress.folder, req.get("filename"))
+    start_download(version_id, req.get("folder"), req.get("filename"))
+    return version_id
 
 
 def list_downloads() -> List[Dict]:

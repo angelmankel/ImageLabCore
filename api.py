@@ -112,6 +112,19 @@ def setup_routes(secondary: bool = False) -> None:
             return web.json_response({"error": "version_id must be an integer", "code": "VALIDATION_ERROR"}, status=400)
         return web.json_response(downloads.cancel_download(version_id))
 
+    @owner.post("/imagelab/api/downloads/{version_id}/retry")
+    async def retry_download(request: web.Request) -> web.Response:
+        """Start a failed / cancelled row again with the version or URL, folder and filename it had."""
+        try:
+            version_id = int(request.match_info["version_id"])
+        except ValueError:
+            return web.json_response({"error": "version_id must be an integer", "code": "VALIDATION_ERROR"}, status=400)
+        try:
+            key = downloads.retry_download(version_id)
+        except downloads.CivitaiError as e:
+            return web.json_response({"error": e.message, "code": e.code}, status=e.status)
+        return web.json_response({"version_id": key, "status": "started"})
+
     # -- local model deletion ---------------------------------------------
 
     @owner.delete("/imagelab/api/models/{model_type}/{filename:.*}")
