@@ -217,7 +217,11 @@ def _refusal(status: int, body: object) -> "CivitaiError":
         return CivitaiError(
             f"Early Access on CivitAI: the creator charges Buzz to download it now.{when}",
             "EARLY_ACCESS", 403)
-    if status == 401 or not os.environ.get("CIVITAI_API_KEY"):
+    if not os.environ.get("CIVITAI_API_KEY"):
+        # The app's own key never reaches the server: say whose key is missing, not "rejected".
+        return CivitaiError("This ComfyUI has no CivitAI key: set CIVITAI_API_KEY where it starts, then restart it",
+                            "NO_TOKEN", 401)
+    if status == 401:
         return CivitaiError("CivitAI rejected the API key (CIVITAI_API_KEY)", "AUTH_ERROR", 401)
     detail = str(info.get("message") or reason or "").strip()
     return CivitaiError(f"CivitAI refused the download{': ' + detail if detail else ' (HTTP 403)'}",
