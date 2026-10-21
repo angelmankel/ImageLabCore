@@ -75,6 +75,12 @@ print(f"[ImageLab] batch preview {'on' if batch_preview.install() else 'off'}")
 
 
 def _scan() -> None:
+    # Serve every hash the sidecars already know before anything reads a model file: sorting
+    # reads safetensors headers and the scan hashes, both slow over a network share.
+    try:
+        print(f"[ImageLab] Preloaded {hashing.preload()} model hashes")
+    except Exception as e:
+        print(f"[ImageLab] Preloading model hashes failed: {e}")
     # Files CivitAI calls "Checkpoint" that are diffusion models only go to diffusion_models/
     # before the first scan, so they are indexed where they can be loaded.
     try:

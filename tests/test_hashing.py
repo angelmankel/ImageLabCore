@@ -1,12 +1,33 @@
 """Run without ComfyUI: python -m unittest discover -s tests."""
 import hashlib
 import importlib.util
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import types
 import unittest
 from unittest.mock import patch
+
+
+class _Paths(dict):
+    """folder_names_and_paths as ComfyUI has it: name -> (paths, extensions), live over `dirs`."""
+    def __init__(self, dirs):
+        super().__init__()
+        self.dirs = dirs
+
+    def __contains__(self, name):
+        return name in self.dirs
+
+    def __iter__(self):
+        return iter(list(self.dirs))
+
+    def get(self, name, default=None):
+        return (self.dirs[name], {".safetensors"}) if name in self.dirs else default
+
+
+OLD_ROOT = "C/Users/donny/Documents/Github/ComfyUI/models"
 
 
 class HashingTests(unittest.TestCase):
@@ -16,12 +37,28 @@ class HashingTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.models = self.root / "models"
         (self.models / "checkpoints").mkdir(parents=True)
+        # A fake ComfyUI folder_paths: each type -> ([dirs], extensions), files listed recursively.
+        self.dirs = {"checkpoints": [str(self.models / "checkpoints")]}
+
+        def names(kind):
+            out = []
+            for d in self.dirs.get(kind, []):
+                out += [str(p.relative_to(d)).replace(os.sep, "/") for p in Path(d).rglob("*.safetensors")]
+            return sorted(set(out))
+
+        def full(kind, name):
+            for d in self.dirs.get(kind, []):
+                if (Path(d) / name).is_file():
+                    return os.path.join(d, *name.split("/"))
+            return None
+
         folders = types.SimpleNamespace(
             models_dir=str(self.models),
-            folder_names_and_paths={"checkpoints": []},
-            get_filename_list=lambda kind: [p.name for p in (self.models / kind).glob("*.safetensors")],
-            get_full_path=lambda kind, name: str(self.models / kind / name),
+            folder_names_and_paths={},
+            get_filename_list=names,
+            get_full_path=full,
         )
+        folders.folder_names_and_paths = _Paths(self.dirs)
         spec = importlib.util.spec_from_file_location("hashing_under_test", Path(__file__).parents[1] / "hashing.py")
         self.h = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {"folder_paths": folders}):
@@ -87,6 +124,153 @@ class HashingTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.h.watch_models()
         self.assertEqual(len(self.h.get_snapshot()[1]), 1)
+
+
+    # -- startup preload, key migration, pending list --------------------------------------
+
+    def _sidecar(self, key, path, digest="cafe"):
+        stat = os.stat(path)
+        self.h.save_index(key, {"key": key, "filename": os.path.basename(path), "hash": digest,
+                                "hashed_at": 1.0, "file": {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}})
+
+    def test_preload_serves_every_sidecar_before_the_scan(self):
+        self.model.write_bytes(b"model")
+        self._sidecar(self.key, self.model, "aa")
+        self._sidecar(OLD_ROOT + "/loras/gone.safetensors", self.model, "bb")
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")), \
+             patch.object(self.h, "_file_signature", side_effect=AssertionError("no model file touched")), \
+             patch.object(self.h.folder_paths, "get_filename_list", side_effect=AssertionError("no listing")):
+            self.assertEqual(self.h.preload(), 2)
+        version, models, pending, progress = self.h.get_listing()
+        self.assertEqual({m["key"]: m["hash"] for m in models},
+                         {self.key: "aa", OLD_ROOT + "/loras/gone.safetensors": "bb"})
+        self.assertFalse(progress["ready"])
+        self.assertNotEqual(version, "empty")
+
+    def test_scan_drops_keys_of_files_that_are_gone_but_keeps_their_sidecars(self):
+        self.model.write_bytes(b"model")
+        self._sidecar(self.key, self.model, "aa")
+        self._sidecar("checkpoints/gone.safetensors", self.model, "bb")
+        self.h.preload()
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        _, models, pending, progress = self.h.get_listing()
+        self.assertEqual([m["key"] for m in models], [self.key])
+        self.assertEqual(progress, {"hashed": 1, "total": 1, "pending": 0, "ready": True})
+        self.assertIsNotNone(self.h.load_index("checkpoints/gone.safetensors"))
+
+    def test_old_extra_path_key_is_carried_over_without_hashing(self):
+        """extra_model_paths.yaml -> symlink: every key changed; same name + size + mtime_ns reuse the hash."""
+        self.model.write_bytes(b"model")
+        old_key = OLD_ROOT + "/checkpoints/test.safetensors"
+        self._sidecar(old_key, self.model, "oldhash")
+        self.h.preload()
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        _, models, pending, _ = self.h.get_listing()
+        self.assertEqual([(m["key"], m["hash"]) for m in models], [(self.key, "oldhash")])
+        self.assertEqual(pending, [])
+        self.assertEqual(self.h.load_index(self.key)["key"], self.key)
+        self.assertIsNotNone(self.h.load_index(old_key), "old sidecars are never deleted")
+        # Idempotent: the next scan reads the new sidecar and changes nothing.
+        version = self.h.get_snapshot()[0]
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        self.assertEqual(self.h.get_snapshot()[0], version)
+
+    def test_new_sidecar_from_the_migration_script_wins(self):
+        self.model.write_bytes(b"model")
+        self._sidecar(OLD_ROOT + "/checkpoints/test.safetensors", self.model, "old")
+        self._sidecar(self.key, self.model, "new")
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        self.assertEqual([m["hash"] for m in self.h.get_snapshot()[1]], ["new"])
+
+    def test_sidecar_copied_with_its_old_key_field_is_filed_under_its_path(self):
+        self.model.write_bytes(b"model")
+        self._sidecar(self.key, self.model, "aa")
+        path = Path(self.h.INDEX_DIR) / "checkpoints" / "test.safetensors.index"
+        data = json.loads(path.read_text())
+        data["key"] = OLD_ROOT + "/checkpoints/test.safetensors"
+        path.write_text(json.dumps(data))
+        self.h.preload()
+        self.assertEqual([m["key"] for m in self.h.get_snapshot()[1]], [self.key])
+
+    def test_moved_file_keeps_its_hash(self):
+        self.model.write_bytes(b"model")
+        self.h.build_index()
+        digest = self.h.get_snapshot()[1][0]["hash"]
+        (self.models / "checkpoints" / "SDXL").mkdir()
+        moved = self.models / "checkpoints" / "SDXL" / "test.safetensors"
+        os.replace(self.model, moved)
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        self.assertEqual([(m["key"], m["hash"]) for m in self.h.get_snapshot()[1]],
+                         [("checkpoints/SDXL/test.safetensors", digest)])
+
+    def test_same_name_different_size_is_hashed_again(self):
+        self.model.write_bytes(b"model")
+        self._sidecar(OLD_ROOT + "/checkpoints/test.safetensors", self.model, "old")
+        self.model.write_bytes(b"another model")
+        self.h.build_index()
+        self.assertEqual(self.h.get_snapshot()[1][0]["hash"], hashlib.sha256(b"another model").hexdigest())
+
+    def test_unhashed_models_are_pending_and_small_ones_go_first(self):
+        big = self.models / "checkpoints" / "big.safetensors"
+        big.write_bytes(b"x" * 1000)
+        self.model.write_bytes(b"small")
+        order, seen = [], []
+        real = self.h.calculate_sha256
+
+        def spy(path):
+            order.append(os.path.basename(path))
+            seen.append({p["filename"]: p["state"] for p in self.h.get_listing()[2]})
+            return real(path)
+
+        with patch.object(self.h, "calculate_sha256", side_effect=spy):
+            self.h.build_index()
+        self.assertEqual(order, ["test.safetensors", "big.safetensors"])
+        self.assertEqual(seen[0], {"test.safetensors": "hashing", "big.safetensors": "queued"})
+        self.assertEqual(seen[1], {"big.safetensors": "hashing"})
+        _, models, pending, progress = self.h.get_listing()
+        self.assertEqual((len(models), pending, progress["hashed"], progress["total"]), (2, [], 2, 2))
+        self.assertIsNone(self.h.get_status()["current"])
+
+    def test_pending_changes_the_version(self):
+        self.model.write_bytes(b"model")
+        versions = []
+        with patch.object(self.h, "calculate_sha256", side_effect=lambda p: versions.append(self.h.get_snapshot()[0]) or "x"):
+            self.h.build_index()
+        self.assertNotEqual(versions[0], "empty")
+        self.assertNotEqual(versions[0], self.h.get_snapshot()[0])
+
+    def test_failed_hash_stays_listed_as_error(self):
+        self.model.write_bytes(b"model")
+        with patch.object(self.h, "calculate_sha256", side_effect=OSError("share gone")):
+            self.h.build_index()
+        pending = self.h.get_listing()[2]
+        self.assertEqual((pending[0]["key"], pending[0]["state"]), (self.key, "error"))
+
+    def test_extra_path_and_resolved_symlink_get_type_relative_keys(self):
+        extra = self.root / "share" / "ckpts"
+        (extra / "SDXL").mkdir(parents=True)
+        (extra / "SDXL" / "a.safetensors").write_bytes(b"a")
+        self.dirs["checkpoints"].append(str(extra))
+        self.assertEqual(self.h.cache_key(str(extra / "SDXL" / "a.safetensors")), "checkpoints/SDXL/a.safetensors")
+        # models/loras is a symlink to the share; a path that comes back resolved keys the same.
+        target = self.root / "share" / "loras"
+        target.mkdir()
+        (target / "l.safetensors").write_bytes(b"l")
+        try:
+            (self.models / "loras").symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("no symlinks here")
+        self.dirs["loras"] = [str(self.models / "loras")]
+        self.assertEqual(self.h.cache_key(str(self.models / "loras" / "l.safetensors")), "loras/l.safetensors")
+        self.assertEqual(self.h.cache_key(str(target / "l.safetensors")), "loras/l.safetensors")
+        self.h.build_index()
+        self.assertEqual(sorted(m["key"] for m in self.h.get_snapshot()[1]),
+                         ["checkpoints/SDXL/a.safetensors", "loras/l.safetensors"])
 
 
 if __name__ == "__main__":

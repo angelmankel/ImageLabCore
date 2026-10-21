@@ -20,7 +20,8 @@ Every list endpoint is ETag'd, so a client that polls costs almost nothing.
 
 | Method | Path | |
 |---|---|---|
-| GET | `/imagelab/api/hashes` | model hash index; send `If-None-Match` to get a 304 |
+| GET | `/imagelab/api/hashes` | model hash index; send `If-None-Match` to get a 304. Also `pending` (models with no hash yet, `state` queued / hashing / error) and `progress` `{hashed, total, pending, ready}` |
+| GET | `/imagelab/api/hashes/status` | hashing progress + the file being read (`current.done` bytes); not ETag'd |
 | GET | `/imagelab/api/downloads` | every tracked download, active or finished |
 | POST | `/imagelab/api/downloads` | start one — `{version_id, folder?, filename?}` from CivitAI, or `{url, folder, filename?}` from any https URL (Hugging Face) |
 | DELETE | `/imagelab/api/downloads/{version_id}` | cancel, or dismiss a finished row |

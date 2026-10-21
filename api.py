@@ -33,24 +33,44 @@ def setup_routes(secondary: bool = False) -> None:
         """
         Return the full model-hash cache in one shot:
 
-            { "version": "<etag>", "models": [ {key, filename, hash, hashed_at}, ... ] }
+            { "version": "<etag>",
+              "models":   [ {key, filename, hash, hashed_at, file}, ... ],
+              "pending":  [ {key, filename, folder, size, state}, ... ],
+              "progress": {hashed, total, pending, ready} }
 
-        `version` is a content token over every (key, hash) pair. Clients
+        `models` only ever holds entries with a hash (older clients read `hash` unguarded).
+        `pending` lists the model files on disk that have no hash yet, smallest first (the order
+        they are hashed in); `state` is "queued", "hashing" or "error" (+ `error`). `ready` is
+        false until the first scan has listed every file -- until then `models` is what the
+        sidecars on disk already knew, and `pending` is not known yet.
+
+        `version` is a content token over every (key, hash) pair and the pending list. Clients
         should send it back via `If-None-Match`; when nothing has changed the
         endpoint replies `304 Not Modified` with no body, so repeat loads are
         essentially free. The payload itself is served straight from memory --
         no per-request disk I/O.
         """
-        version, entries = hashing.get_snapshot()
+        version, entries, pending, progress = hashing.get_listing()
         etag = f'"{version}"'
 
         if request.headers.get("If-None-Match") == etag:
             return web.Response(status=304, headers={"ETag": etag})
 
         return web.json_response(
-            {"version": version, "models": entries},
+            {"version": version, "models": entries, "pending": pending, "progress": progress},
             headers={"ETag": etag, "Cache-Control": "no-cache"},
         )
+
+    @owner.get("/imagelab/api/hashes/status")
+    async def get_hash_status(request: web.Request) -> web.Response:
+        """
+        How far hashing is, for a progress line. Cheap, from memory, not ETag'd (it moves while a
+        file is read):
+
+            { "hashed": 140, "total": 146, "pending": 6, "ready": true,
+              "current": {key, filename, size, done} | null }     # done = bytes read so far
+        """
+        return web.json_response(hashing.get_status(), headers={"Cache-Control": "no-cache"})
 
     # -- CivitAI downloads -------------------------------------------------
 

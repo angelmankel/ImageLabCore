@@ -45,6 +45,11 @@ the mtime of `api.py`.
   sorts nothing, downloads nothing, and serves only favorites + version (favorites read *its*
   temp/). nginx sends its other `/imagelab/api/*` requests to the first. `/imagelab/api/version`
   says `"secondary": true|false`.
+- **Hashing never hides a known model.** `hashing.preload()` serves every `model_index/` sidecar
+  before sorting or scanning; a scan then reconciles files with sidecars (a key that changed takes
+  over the sidecar with the same name + size + mtime_ns, copied to the new key, old one kept) and
+  hashes the rest smallest first. `/hashes` lists those as `pending`, with `progress`. Keys are
+  relative to the models dir, or `<type>/…` for an extra path, never the resolved symlink target.
 - Tests: `python -m unittest discover -s tests` (the download test needs aiohttp).
 
 **The project rules — pods, money, pulling images before a terminate — live in
