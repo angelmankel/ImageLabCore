@@ -15,6 +15,14 @@ plus a cheap content version token (`_VERSION`). This is what the API layer
 serves to the frontend in a single request — building the response is then
 just a dict read, with no disk I/O per request.
 
+Every sidecar is also written beside its model, in `<model folder>/.hash-index/<file>.index`, so
+the hashes travel with the files: every machine that mounts the same share (the LAN box, winold,
+a pod) reads the hashes another one made instead of reading terabytes again. `model_index/` stays
+as this machine's own copy — preload reads it before any slow share is touched, and it still works
+when the share is read-only. A scan uses the local copy, then the one beside the model, and fills
+in whichever is missing. Size must match exactly; mtimes within a microsecond count as the same,
+because Windows (and SMB) keep 100 ns ticks where Linux keeps every nanosecond.
+
 Hashing never hides a model that is already known:
   - `preload()` publishes every sidecar on disk before anything else runs
     (local JSON reads only, no model file is touched);
@@ -37,6 +45,8 @@ import folder_paths
 # Per-model `.index` sidecar cache. Mirrors the models-dir tree so the files
 # stay human-browsable. Gitignored — this is local user data.
 INDEX_DIR = os.path.join(os.path.dirname(__file__), "model_index")
+# The folder beside each model that holds its shared sidecar.
+BESIDE_DIR = ".hash-index"
 
 # Model folder types to scan.
 MODEL_TYPES = [
@@ -63,11 +73,22 @@ _LOCK = threading.Lock()
 _KEY_LOCKS: Dict[str, threading.Lock] = {}
 # The file being read right now: {key, filename, size, done} (bytes).
 _CURRENT: Dict = {}
+# key -> the file signature its beside sidecar is known to hold (or failed to take, on a read-only
+# share). A scan runs every 30 seconds; this keeps it from re-reading every sidecar on the share.
+_BESIDE_SEEN: Dict[str, Dict] = {}
 
 
 def _file_signature(filepath: str) -> Dict:
     stat = os.stat(filepath)
     return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _same_file(a: Optional[Dict], b: Optional[Dict]) -> bool:
+    """Two signatures of one unchanged file: same size, mtimes within 1 µs (Windows keeps 100 ns ticks)."""
+    if not (isinstance(a, dict) and isinstance(b, dict)) or a.get("size") != b.get("size"):
+        return False
+    ma, mb = a.get("mtime_ns"), b.get("mtime_ns")
+    return isinstance(ma, int) and isinstance(mb, int) and abs(ma - mb) < 1000
 
 
 def _under(path: str, root: str) -> Optional[str]:
@@ -156,22 +177,79 @@ def calculate_sha256(filepath: str) -> str:
     return sha256.hexdigest()
 
 
-def load_index(key: str) -> Optional[Dict]:
-    """Return the cached index for a key, or None if it hasn't been hashed."""
-    path = os.path.join(INDEX_DIR, *key.split("/")) + ".index"
-    if os.path.exists(path):
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None
+def _beside_path(filepath: str) -> str:
+    """The shared sidecar of a model file: `<its folder>/.hash-index/<its name>.index`."""
+    folder, name = os.path.split(filepath)
+    return os.path.join(folder, BESIDE_DIR, name + ".index")
 
 
-def save_index(key: str, data: Dict) -> None:
-    """Write the index sidecar for a key."""
-    with open(_index_path(key), "w") as f:
+def _read_json(path: str) -> Optional[Dict]:
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_json(path: str, data: Dict) -> None:
+    """Write through a temp file, so a machine reading the share never sees half a sidecar."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def load_index(key: str, filepath: Optional[str] = None) -> Optional[Dict]:
+    """
+    Return the cached index for a key, or None if it hasn't been hashed. The local copy first;
+    with `filepath`, the sidecar beside the model when there is no local one.
+    """
+    entry = _read_json(os.path.join(INDEX_DIR, *key.split("/")) + ".index")
+    if entry is None and filepath:
+        entry = _read_json(_beside_path(filepath))
+        if entry is not None:
+            entry = dict(entry, key=key, filename=os.path.basename(filepath))
+    return entry
+
+
+def save_index(key: str, data: Dict, filepath: Optional[str] = None) -> None:
+    """Write the local sidecar for a key, and with `filepath` the shared one beside the model too."""
+    _write_json(_index_path(key), data)
+    if filepath:
+        _put_beside(key, filepath, data)
+
+
+def _put_beside(key: str, filepath: str, data: Dict) -> None:
+    """Write the shared sidecar. A share that refuses it (read-only) is said once, never fatal."""
+    try:
+        _write_json(_beside_path(filepath), dict(data, key=key))
+    except OSError as e:
+        if key not in _BESIDE_SEEN:
+            print(f"[ImageLab] Could not write {_beside_path(filepath)}: {e}")
+    _BESIDE_SEEN[key] = data.get("file")
+
+
+def _read_beside(key: str, filepath: str, signature: Dict) -> Optional[Dict]:
+    """The shared sidecar beside the model when it holds a hash for this very file, else None."""
+    entry = _read_json(_beside_path(filepath))
+    if not (_valid(entry) and _same_file(entry["file"], signature)):
+        return None
+    _BESIDE_SEEN[key] = entry["file"]
+    return dict(entry, key=key, filename=os.path.basename(filepath))
+
+
+def _ensure_beside(key: str, filepath: str, entry: Dict) -> None:
+    """A hash known here goes beside its model once, for the other machines on the share."""
+    if _same_file(_BESIDE_SEEN.get(key), entry.get("file")):
+        return
+    try:
+        there = _read_beside(key, filepath, entry["file"])
+        if not (there and there.get("hash") == entry.get("hash")):
+            _put_beside(key, filepath, entry)
+    except Exception as e:
+        print(f"[ImageLab] Could not share the hash of {key}: {e}")
 
 
 def _valid(entry: Optional[Dict]) -> bool:
@@ -267,7 +345,13 @@ def hash_model(filepath: str, key: Optional[str] = None) -> Dict:
             raise ValueError("Download still in progress")
         signature = _file_signature(filepath)
         index = load_index(key)
-        if not (index and index.get("hash") and index.get("file") == signature):
+        if index and index.get("hash") and _same_file(index.get("file"), signature):
+            _ensure_beside(key, filepath, index)
+        else:
+            index = _read_beside(key, filepath, signature)
+            if index:
+                save_index(key, index)  # another machine hashed it: keep a local copy
+        if not index:
             print(f"[ImageLab] Hashing {key} ...")
             digest = calculate_sha256(filepath)
             if os.path.exists(filepath + ".aria2") or _file_signature(filepath) != signature:
@@ -279,7 +363,7 @@ def hash_model(filepath: str, key: Optional[str] = None) -> Dict:
                 "hashed_at": time.time(),
                 "file": signature,
             }
-            save_index(key, index)
+            save_index(key, index, filepath)
 
         _remember(index)
         return index
@@ -299,7 +383,7 @@ def _find_moved(key: str, signature: Dict, by_name: Dict[str, List[Dict]]) -> Op
     filename = key.rsplit("/", 1)[-1]
     candidates = [
         e for e in by_name.get(filename.lower(), ())
-        if e["key"] != key and e.get("file") == signature
+        if e["key"] != key and _same_file(e.get("file"), signature)
     ]
     if not candidates:
         return None
@@ -355,13 +439,19 @@ def build_index() -> Dict[str, int]:
                 continue
             signature = _file_signature(filepath)
             entry = sidecars.get(key)
-            if _valid(entry) and entry["file"] == signature:
+            if _valid(entry) and _same_file(entry["file"], signature):
+                _ensure_beside(key, filepath, entry)
                 found[key] = entry
+                continue
+            beside = _read_beside(key, filepath, signature)
+            if beside:
+                save_index(key, beside)  # another machine on the share hashed it
+                found[key] = beside
                 continue
             moved = _find_moved(key, signature, by_name)
             if moved:
                 entry = dict(moved, key=key, filename=os.path.basename(filepath))
-                save_index(key, entry)
+                save_index(key, entry, filepath)
                 print(f"[ImageLab] Hash of {key} carried over from {moved['key']}")
                 found[key] = entry
                 continue
@@ -466,14 +556,19 @@ def get_status() -> Dict:
 
 def forget(filepath: str) -> None:
     """
-    Drop a model from the index: delete its `.index` sidecar and remove its
-    in-memory entry. Called when a model file is deleted from disk. `cache_key`
+    Drop a model from the index: delete its `.index` sidecars (local and beside the model) and
+    remove its in-memory entry. Called when a model file is deleted from disk. `cache_key`
     is pure path math, so this works whether or not the file still exists.
     """
     key = cache_key(filepath)
-    path = os.path.join(INDEX_DIR, *key.split("/")) + ".index"
-    if os.path.exists(path):
-        os.remove(path)
+    for path in (os.path.join(INDEX_DIR, *key.split("/")) + ".index", _beside_path(filepath)):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print(f"[ImageLab] Could not remove {path}: {e}")
+    _BESIDE_SEEN.pop(key, None)
     with _LOCK:
         removed = _INDEX.pop(key, None) is not None
         removed = _PENDING.pop(key, None) is not None or removed
@@ -489,11 +584,11 @@ def relocate(old_path: str, new_path: str) -> None:
     entry is missing or stale.
     """
     old_key, new_key = cache_key(old_path), cache_key(new_path)
-    previous = load_index(old_key)
+    previous = load_index(old_key, old_path)
     forget(old_path)
-    if previous and previous.get("hash") and previous.get("file") == _file_signature(new_path):
+    if previous and previous.get("hash") and _same_file(previous.get("file"), _file_signature(new_path)):
         entry = dict(previous, key=new_key, filename=os.path.basename(new_path))
-        save_index(new_key, entry)
+        save_index(new_key, entry, new_path)
         _remember(entry)
     else:
         hash_model(new_path, new_key)

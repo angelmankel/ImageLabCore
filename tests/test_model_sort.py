@@ -106,7 +106,7 @@ class ModelSortTests(unittest.TestCase):
         (self.models / "checkpoints" / "wanQ8L.gguf").write_bytes(b"GGUF\x03\x00\x00\x00rest")
         result = ms.sort_checkpoints()
         self.assertEqual(sorted(result["moved"]), ["wanQ8H.gguf.safetensors", "wanQ8L.gguf"])
-        self.assertEqual(sorted(p.name for p in (self.models / "diffusion_models").iterdir()), ["wanQ8H.gguf", "wanQ8L.gguf"])
+        self.assertEqual(sorted(p.name for p in (self.models / "diffusion_models").iterdir() if p.name != ".hash-index"), ["wanQ8H.gguf", "wanQ8L.gguf"])
         self.assertEqual(list((self.models / "checkpoints").iterdir()), [])
         self.assertEqual(ms.gguf_name("a.safetensors"), "a.gguf")
 

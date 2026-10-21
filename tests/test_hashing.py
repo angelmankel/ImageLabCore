@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import shutil
 import os
 from pathlib import Path
 import sys
@@ -250,6 +251,74 @@ class HashingTests(unittest.TestCase):
             self.h.build_index()
         pending = self.h.get_listing()[2]
         self.assertEqual((pending[0]["key"], pending[0]["state"]), (self.key, "error"))
+
+    def _beside(self, path):
+        return Path(path).parent / ".hash-index" / (Path(path).name + ".index")
+
+    def test_hash_is_written_beside_the_model(self):
+        (self.models / "checkpoints" / "SDXL").mkdir()
+        model = self.models / "checkpoints" / "SDXL" / "a.safetensors"
+        model.write_bytes(b"model")
+        self.h.build_index()
+        data = json.loads(self._beside(model).read_text())
+        self.assertEqual((data["key"], data["hash"]),
+                         ("checkpoints/SDXL/a.safetensors", hashlib.sha256(b"model").hexdigest()))
+
+    def test_another_machines_hash_beside_the_model_is_used(self):
+        """A fresh machine on the same share: no local index, the sidecar beside the model is enough."""
+        self.model.write_bytes(b"model")
+        self.h.build_index()
+        shutil.rmtree(self.h.INDEX_DIR)
+        self.h._BESIDE_SEEN.clear()
+        self.h._INDEX.clear()
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        self.assertEqual(self.h.get_snapshot()[1][0]["hash"], hashlib.sha256(b"model").hexdigest())
+        self.assertIsNotNone(self.h.load_index(self.key), "a local copy is kept")
+
+    def test_existing_local_hash_is_shared_beside_the_model(self):
+        self.model.write_bytes(b"model")
+        self._sidecar(self.key, self.model, "aa")
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        self.assertEqual(json.loads(self._beside(self.model).read_text())["hash"], "aa")
+
+    def test_mtime_rounded_by_windows_still_matches(self):
+        self.model.write_bytes(b"model")
+        stat = os.stat(self.model)
+        rounded = stat.st_mtime_ns - stat.st_mtime_ns % 100 - 100  # 100 ns ticks, a tick off at most
+        self.h.save_index(self.key, {"key": self.key, "hash": "win", "file": {"size": stat.st_size, "mtime_ns": rounded}})
+        with patch.object(self.h, "calculate_sha256", side_effect=AssertionError("no hashing")):
+            self.h.build_index()
+        self.assertEqual(self.h.get_snapshot()[1][0]["hash"], "win")
+
+    def test_replaced_file_drops_the_stale_hash_beside_it(self):
+        self.model.write_bytes(b"first")
+        self.h.build_index()
+        self.model.write_bytes(b"a different model")
+        os.utime(self.model, ns=(1, 1))
+        self.h.build_index()
+        self.assertEqual(json.loads(self._beside(self.model).read_text())["hash"],
+                         hashlib.sha256(b"a different model").hexdigest())
+
+    def test_forget_removes_the_hash_beside_the_model(self):
+        self.model.write_bytes(b"model")
+        self.h.build_index()
+        self.h.forget(str(self.model))
+        self.assertFalse(self._beside(self.model).exists())
+
+    def test_read_only_share_still_hashes(self):
+        self.model.write_bytes(b"model")
+        real = self.h._write_json
+        def refuse(path, data):
+            if ".hash-index" in path:
+                raise PermissionError("read-only")
+            real(path, data)
+        with patch.object(self.h, "_write_json", side_effect=refuse):
+            self.h.build_index()
+            self.h.build_index()
+        self.assertEqual(self.h.get_snapshot()[1][0]["hash"], hashlib.sha256(b"model").hexdigest())
+        self.assertIsNotNone(self.h.load_index(self.key))
 
     def test_extra_path_and_resolved_symlink_get_type_relative_keys(self):
         extra = self.root / "share" / "ckpts"

@@ -45,6 +45,11 @@ the mtime of `api.py`.
   sorts nothing, downloads nothing, and serves only favorites + version (favorites read *its*
   temp/). nginx sends its other `/imagelab/api/*` requests to the first. `/imagelab/api/version`
   says `"secondary": true|false`.
+- **Hashes travel with the models.** Every sidecar is written twice: `model_index/` (this machine's
+  copy, read by `preload()`) and `<model folder>/.hash-index/<file>.index` beside the model, so a
+  machine mounting the same share (gpu-server, winold, a pod) reuses the others' hashes. A scan
+  takes the local copy, then the one beside, and fills in the missing one; a read-only share only
+  logs once. Mtimes within 1 µs match (Windows/SMB keep 100 ns ticks).
 - **Hashing never hides a known model.** `hashing.preload()` serves every `model_index/` sidecar
   before sorting or scanning; a scan then reconciles files with sidecars (a key that changed takes
   over the sidecar with the same name + size + mtime_ns, copied to the new key, old one kept) and
