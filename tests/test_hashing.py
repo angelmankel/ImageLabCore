@@ -341,6 +341,65 @@ class HashingTests(unittest.TestCase):
         self.assertEqual(sorted(m["key"] for m in self.h.get_snapshot()[1]),
                          ["checkpoints/SDXL/a.safetensors", "loras/l.safetensors"])
 
+    EXTRA_FOLDERS = ["text_encoders", "ipadapter", "instantid", "pulid", "style_models", "background_removal"]
+
+    def test_extra_folders_are_scanned(self):
+        for name in ["clip"] + self.EXTRA_FOLDERS:
+            self.assertIn(name, self.h.MODEL_TYPES)
+
+    def test_every_extra_folder_is_hashed_with_its_sidecar_beside_it(self):
+        expected = []
+        for name in self.EXTRA_FOLDERS:
+            folder = self.models / name
+            folder.mkdir()
+            (folder / f"{name}.safetensors").write_bytes(name.encode())
+            self.dirs[name] = [str(folder)]
+            expected.append(f"{name}/{name}.safetensors")
+        self.h.build_index()
+        snapshot = {m["key"]: m["hash"] for m in self.h.get_snapshot()[1]}
+        self.assertEqual(sorted(snapshot), sorted(expected))
+        for name in self.EXTRA_FOLDERS:
+            model = self.models / name / f"{name}.safetensors"
+            data = json.loads(self._beside(model).read_text())
+            self.assertEqual((data["key"], data["hash"]),
+                             (f"{name}/{name}.safetensors", hashlib.sha256(name.encode()).hexdigest()))
+
+    def test_old_clip_name_still_scanned_when_text_encoders_is_unknown(self):
+        folder = self.models / "clip"
+        folder.mkdir()
+        (folder / "t5.safetensors").write_bytes(b"t5")
+        self.dirs["clip"] = [str(folder)]
+        self.h.build_index()
+        self.assertEqual([m["key"] for m in self.h.get_snapshot()[1]], ["clip/t5.safetensors"])
+
+    def test_directories_and_sidecars_listed_by_an_unfiltered_folder_are_skipped(self):
+        """A pack that registers no extensions gets every entry listed: a model directory, our own sidecars."""
+        folder = self.models / "instantid"
+        (folder / "antelopev2").mkdir(parents=True)
+        (folder / "ip-adapter.bin").write_bytes(b"instantid")
+        self.dirs["instantid"] = [str(folder)]
+        listed = ["antelopev2", "ip-adapter.bin", ".hash-index/ip-adapter.bin.index"]
+        real = self.h.folder_paths.get_filename_list
+        real_full = self.h.folder_paths.get_full_path
+
+        def names(kind):
+            return listed if kind == "instantid" else real(kind)
+
+        def full(kind, name):
+            if kind == "instantid":
+                path = folder / name
+                return str(path) if path.exists() else None
+            return real_full(kind, name)
+
+        with patch.object(self.h.folder_paths, "get_filename_list", names), \
+                patch.object(self.h.folder_paths, "get_full_path", full):
+            self.h.build_index()
+            self.assertTrue(self._beside(folder / "ip-adapter.bin").is_file())
+            self.h.build_index()  # now the sidecar exists and is listed too
+        keys = [m["key"] for m in self.h.get_snapshot()[1]]
+        self.assertEqual(keys, ["instantid/ip-adapter.bin"])
+        self.assertEqual(self.h.get_listing()[2], [])
+
 
 if __name__ == "__main__":
     unittest.main()

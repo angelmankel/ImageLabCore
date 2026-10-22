@@ -48,11 +48,17 @@ INDEX_DIR = os.path.join(os.path.dirname(__file__), "model_index")
 # The folder beside each model that holds its shared sidecar.
 BESIDE_DIR = ".hash-index"
 
-# Model folder types to scan.
+# Model folder types to scan: ComfyUI's folder_paths names. A name this ComfyUI does not register
+# is skipped, so older and newer trees can share one list.
 MODEL_TYPES = [
     "checkpoints", "loras", "vae", "embeddings", "upscale_models",
-    "controlnet", "clip", "clip_vision", "diffusion_models",
+    "controlnet",
+    "text_encoders",  # ComfyUI's name for models/text_encoders (and models/clip) since late 2024
+    "clip",  # the old name, for a ComfyUI from before text_encoders
+    "clip_vision", "diffusion_models",
     "unet_gguf",  # ComfyUI-GGUF: the .gguf files in diffusion_models/
+    "style_models", "background_removal",  # ComfyUI core: Redux, BiRefNet
+    "ipadapter", "instantid", "pulid",  # registered by their custom node packs
 ]
 
 # In-memory snapshot of every known model: cache_key -> index dict.
@@ -399,7 +405,9 @@ def _list_models() -> Dict[str, Tuple[str, str]]:
             continue
         for filename in folder_paths.get_filename_list(model_type):
             filepath = folder_paths.get_full_path(model_type, filename)
-            if not filepath:
+            # A folder without an extension filter lists everything: never our own sidecars, and
+            # never a directory (InsightFace models are folders and stay "directory").
+            if not filepath or BESIDE_DIR in filename.replace("\\", "/").split("/") or not os.path.isfile(filepath):
                 continue
             files.setdefault(cache_key(filepath), (model_type, filepath))
     return files
