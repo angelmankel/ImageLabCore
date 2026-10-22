@@ -51,10 +51,11 @@ from . import downloads
 from . import model_sort
 from . import preview
 from . import batch_preview
+from . import save_video_ws
 
-# No custom nodes yet — ComfyUI still expects these symbols to exist.
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
+# The one node: SaveVideoWebsocket (video bytes over ComfyUI's websocket, no file on the worker).
+NODE_CLASS_MAPPINGS = dict(save_video_ws.NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS = dict(save_video_ws.NODE_DISPLAY_NAME_MAPPINGS)
 
 # A pod can run a second ComfyUI (for video) on the same models/, custom_nodes/ and this
 # directory. Only one process may scan, sort and download: two would hash the same gigabytes twice,

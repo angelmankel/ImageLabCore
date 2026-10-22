@@ -4,7 +4,8 @@
 commit + push here, then move the pin in ImageLabDocker. Full rule: `../ImageLabDocker/CLAUDE.md`,
 rule 6.
 
-Adds an HTTP API to ComfyUI and no nodes at all. See `README.md` for the route table.
+Adds an HTTP API to ComfyUI and one node, `SaveVideoWebsocket` (`save_video_ws.py`). See `README.md`
+for the route table.
 
 **Changing it needs no image rebuild.** It lives on the pod's volume, symlinked into `custom_nodes`
 by `ImageLabDocker/start.sh`:
@@ -23,7 +24,7 @@ the mtime of `api.py`.
 
 ## Things to know
 
-- **Only `hashing`, `api`, `downloads`, `favorites`, `model_sort`, `preview` and `batch_preview` are imported.** `batch_preview` patches ComfyUI's previewer so a batch's live preview is all N pictures side by side in one frame (the web app cuts it into tiles; `IMAGELAB_BATCH_PREVIEW=0` turns it off). `routes.py`, `workflows.py`,
+- **Only `hashing`, `api`, `downloads`, `favorites`, `model_sort`, `preview`, `batch_preview` and `save_video_ws` are imported.** `batch_preview` patches ComfyUI's previewer so a batch's live preview is all N pictures side by side in one frame (the web app cuts it into tiles; `IMAGELAB_BATCH_PREVIEW=0` turns it off). `routes.py`, `workflows.py`,
   `imagelab_nodes.py`, `resources.py`, `civitai_routes.py`, `parameters.py` and
   `schema_generator.py` are reference only and deliberately not
   loaded. Editing one of those and seeing nothing change is an easy hour to lose.
@@ -55,6 +56,11 @@ the mtime of `api.py`.
   over the sidecar with the same name + size + mtime_ns, copied to the new key, old one kept) and
   hashes the rest smallest first. `/hashes` lists those as `pending`, with `progress`. Keys are
   relative to the models dir, or `<type>/…` for an extra path, never the resolved symlink target.
+- **`SaveVideoWebsocket` writes no file.** It encodes the VIDEO into a BytesIO with ComfyUI's own
+  `save_to` and sends it on ComfyUI's `/ws` to the prompt's `client_id` as binary frames of event
+  type `0x494C5643` ("ILVC"): `[4 B event][4 B n][n B JSON header][chunk]`, each frame at most 4 MiB,
+  header `{video_id, prompt_id, node_id, mime, size, sha256, index, total, offset}`. imagelab-server
+  `packages/comfy/src/binary.ts` decodes it; change both together. Docstring of `save_video_ws.py`.
 - Tests: `python -m unittest discover -s tests` (the download test needs aiohttp).
 
 **The project rules — pods, money, pulling images before a terminate — live in
