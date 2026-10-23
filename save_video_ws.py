@@ -28,6 +28,9 @@ Every frame is at most 4 MiB in all (`MAX_FRAME_BYTES`); a client concatenates t
 
 Inputs match `SaveVideo` minus `filename_prefix` (imagelab-server `packages/graphs` builds them):
 `video` (VIDEO), `format` mp4 | webm, `codec` h264 | av1 (webm takes AV1 only, as in SaveVideo).
+Optional `crf` (INT 0..63; H.264 stops at 51): when the prompt carries it, the clip is re-encoded with
+that CRF, the way SaveVideo's `codec.encoding = re-encode` does (`save_to(..., crf=)`). When it is
+absent the call is exactly the old one, so the encoder keeps its own default (H.264 23, AV1 30).
 """
 import hashlib
 import io
@@ -43,6 +46,8 @@ HEADER_RESERVE = 16 * 1024
 CHUNK_BYTES = MAX_FRAME_BYTES - HEADER_RESERVE
 
 MIME = {"mp4": "video/mp4", "webm": "video/webm"}
+# Highest CRF each codec takes (SaveVideo's re-encode options: H.264 0..51, AV1 0..63).
+MAX_CRF = {"h264": 51, "av1": 63}
 
 
 def chunk_payloads(data: bytes, header: dict, chunk_bytes: int = CHUNK_BYTES) -> list:
@@ -77,12 +82,28 @@ def parse_payload(payload: bytes):
     return json.loads(payload[4:4 + n].decode("utf-8")), payload[4 + n:]
 
 
-def encode_video(video, format_name: str, codec_name: str) -> bytes:
-    """The whole clip, encoded in memory with ComfyUI's own `save_to` (no file is written)."""
+def check_crf(codec_name: str, crf):
+    """`crf` as an int, or None when unset. Raises ValueError outside 0..MAX_CRF[codec]."""
+    if crf is None:
+        return None
+    if isinstance(crf, bool) or not isinstance(crf, (int, float)) or crf != int(crf):
+        raise ValueError(f"crf must be a whole number, got {crf!r}")
+    top = MAX_CRF.get(codec_name, 63)
+    if not 0 <= crf <= top:
+        raise ValueError(f"crf for {codec_name} must be 0..{top}, got {crf}")
+    return int(crf)
+
+
+def encode_video(video, format_name: str, codec_name: str, crf=None) -> bytes:
+    """The whole clip, encoded in memory with ComfyUI's own `save_to` (no file is written).
+
+    `crf` set re-encodes with it, as SaveVideo's `re-encode` option does; None makes the old call.
+    """
     from comfy_api.latest import Types
 
     buf = io.BytesIO()
-    video.save_to(buf, format=Types.VideoContainer(format_name), codec=Types.VideoCodec(codec_name))
+    kwargs = {} if crf is None else {"crf": crf}
+    video.save_to(buf, format=Types.VideoContainer(format_name), codec=Types.VideoCodec(codec_name), **kwargs)
     return buf.getvalue()
 
 
@@ -101,6 +122,13 @@ class SaveVideoWebsocket:
                 "format": (["mp4", "webm"], {"default": "mp4", "tooltip": "Container. WebM takes AV1 only."}),
                 "codec": (["h264", "av1"], {"default": "h264"}),
             },
+            "optional": {
+                "crf": ("INT", {
+                    "default": 23, "min": 0, "max": 63, "step": 1,
+                    "tooltip": "Re-encode with this CRF: lower is higher quality and a bigger file. "
+                               "H.264 takes 0..51, AV1 0..63. Left out of the prompt, the encoder default is kept.",
+                }),
+            },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
@@ -110,12 +138,13 @@ class SaveVideoWebsocket:
     CATEGORY = "imagelab"
     DESCRIPTION = "Sends the video to the websocket client as binary frames; writes no file."
 
-    def send_video(self, video, format="mp4", codec="h264", unique_id=None):
+    def send_video(self, video, format="mp4", codec="h264", crf=None, unique_id=None):
         if format not in MIME:
             raise ValueError(f"format must be one of {sorted(MIME)}, got {format!r}")
         if format == "webm" and codec != "av1":
             raise ValueError("WebM output requires the AV1 codec")
-        data = encode_video(video, format, codec)
+        crf = check_crf(codec, crf)
+        data = encode_video(video, format, codec) if crf is None else encode_video(video, format, codec, crf)
 
         from server import PromptServer
 

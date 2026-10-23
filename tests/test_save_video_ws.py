@@ -58,7 +58,9 @@ class FrameTest(unittest.TestCase):
             svw.parse_payload(p[:6])
 
 
-class NodeTest(unittest.TestCase):
+class _NodeCase(unittest.TestCase):
+    """A fake PromptServer that records frames, and an encoder that returns ~5 MiB of bytes."""
+
     def setUp(self):
         self.sent = []
         sent = self.sent
@@ -88,6 +90,8 @@ class NodeTest(unittest.TestCase):
             else:
                 sys.modules[k] = v
 
+
+class NodeTest(_NodeCase):
     def test_sends_ordered_chunks_to_the_prompt_client(self):
         self.assertEqual(svw.SaveVideoWebsocket().send_video(object(), "mp4", "h264", unique_id="12"), {})
         self.assertEqual(len(self.sent), 2)
@@ -113,6 +117,84 @@ class NodeTest(unittest.TestCase):
         self.assertTrue(svw.SaveVideoWebsocket.OUTPUT_NODE)
         self.assertEqual(svw.SaveVideoWebsocket.RETURN_TYPES, ())
         self.assertEqual(svw.SaveVideoWebsocket.CATEGORY, "imagelab")
+
+    def test_declares_an_optional_int_crf(self):
+        types_ = svw.SaveVideoWebsocket.INPUT_TYPES()
+        self.assertNotIn("crf", types_["required"])
+        kind, opts = types_["optional"]["crf"]
+        self.assertEqual((kind, opts["min"], opts["max"]), ("INT", 0, 63))
+
+
+class CrfTest(_NodeCase):
+    """The optional crf: passed to the encoder only when set, refused outside the codec's range."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        calls, encoded = self.calls, self.encoded
+
+        def encode(video, f, c, *rest):
+            calls.append((f, c) + rest)
+            return encoded
+
+        svw.encode_video = encode
+
+    def test_unset_crf_makes_the_old_three_argument_call(self):
+        svw.SaveVideoWebsocket().send_video(object(), "mp4", "h264", unique_id="1")
+        self.assertEqual(self.calls, [("mp4", "h264")])
+
+    def test_crf_reaches_the_encoder(self):
+        svw.SaveVideoWebsocket().send_video(object(), "mp4", "h264", crf=16, unique_id="1")
+        svw.SaveVideoWebsocket().send_video(object(), "webm", "av1", crf=63)
+        self.assertEqual(self.calls, [("mp4", "h264", 16), ("webm", "av1", 63)])
+        self.assertEqual(len(self.sent), 4)
+
+    def test_crf_out_of_range_is_refused_before_encoding(self):
+        for codec, crf in (("h264", 52), ("h264", -1), ("av1", 64), ("h264", 20.5), ("h264", "20")):
+            with self.assertRaises(ValueError, msg=f"{codec} {crf!r}"):
+                svw.SaveVideoWebsocket().send_video(object(), "mp4", codec, crf=crf)
+        self.assertEqual((self.calls, self.sent), ([], []))
+
+    def test_h264_takes_51_and_a_whole_float(self):
+        svw.SaveVideoWebsocket().send_video(object(), "mp4", "h264", crf=51)
+        svw.SaveVideoWebsocket().send_video(object(), "mp4", "av1", crf=30.0)
+        self.assertEqual(self.calls, [("mp4", "h264", 51), ("mp4", "av1", 30)])
+
+
+class EncodeTest(unittest.TestCase):
+    """encode_video calls VideoInput.save_to like SaveVideo does, with crf only when set."""
+
+    def setUp(self):
+        latest = types.ModuleType("comfy_api.latest")
+        latest.Types = types.SimpleNamespace(VideoContainer=lambda v: ("container", v), VideoCodec=lambda v: ("codec", v))
+        pkg = types.ModuleType("comfy_api")
+        pkg.latest = latest
+        self._saved = {k: sys.modules.get(k) for k in ("comfy_api", "comfy_api.latest")}
+        sys.modules.update({"comfy_api": pkg, "comfy_api.latest": latest})
+        self.calls = []
+        calls = self.calls
+
+        class FakeVideo:
+            def save_to(self, path, **kwargs):
+                calls.append(kwargs)
+                path.write(b"clip")
+
+        self.video = FakeVideo()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def test_without_crf_save_to_gets_no_crf(self):
+        self.assertEqual(svw.encode_video(self.video, "mp4", "h264"), b"clip")
+        self.assertEqual(self.calls, [{"format": ("container", "mp4"), "codec": ("codec", "h264")}])
+
+    def test_with_crf_save_to_re_encodes(self):
+        svw.encode_video(self.video, "webm", "av1", 40)
+        self.assertEqual(self.calls, [{"format": ("container", "webm"), "codec": ("codec", "av1"), "crf": 40}])
 
 
 if __name__ == "__main__":
